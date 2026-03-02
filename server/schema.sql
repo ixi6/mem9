@@ -1,11 +1,22 @@
-CREATE TABLE IF NOT EXISTS space_tokens (
+CREATE TABLE IF NOT EXISTS user_tokens (
   api_token     VARCHAR(64)   PRIMARY KEY,
-  space_id      VARCHAR(36)   NOT NULL,
-  space_name    VARCHAR(255)  NOT NULL,
-  agent_name    VARCHAR(100)  NOT NULL,
-  agent_type    VARCHAR(50),
+  user_id       VARCHAR(36)   NOT NULL,
+  user_name     VARCHAR(255)  NOT NULL,
   created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_space (space_id)
+  INDEX idx_user (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS space_tokens (
+  api_token       VARCHAR(64)   PRIMARY KEY,
+  space_id        VARCHAR(36)   NOT NULL,
+  space_name      VARCHAR(255)  NOT NULL,
+  agent_name      VARCHAR(100)  NOT NULL,
+  agent_type      VARCHAR(50),
+  user_id         VARCHAR(36)   NOT NULL DEFAULT '',
+  workspace_key   VARCHAR(64)   NOT NULL DEFAULT '',
+  created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_space (space_id),
+  INDEX idx_user_workspace (user_id, workspace_key)
 );
 
 CREATE TABLE IF NOT EXISTS memories (
@@ -60,3 +71,16 @@ CREATE TABLE IF NOT EXISTS memories (
 --   ADD COLUMN last_write_status TINYINT;
 -- CREATE INDEX idx_tombstone ON memories(space_id, tombstone);
 -- CREATE UNIQUE INDEX idx_last_write_id ON memories(space_id, last_write_id);
+
+-- Migration: add user_tokens table and workspace isolation columns to space_tokens.
+-- CREATE TABLE IF NOT EXISTS user_tokens (
+--   api_token     VARCHAR(64)   PRIMARY KEY,
+--   user_id       VARCHAR(36)   NOT NULL,
+--   user_name     VARCHAR(255)  NOT NULL,
+--   created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+--   INDEX idx_user (user_id)
+-- );
+-- ALTER TABLE space_tokens
+--   ADD COLUMN user_id       VARCHAR(36) NOT NULL DEFAULT '',
+--   ADD COLUMN workspace_key VARCHAR(64) NOT NULL DEFAULT '';
+-- CREATE INDEX idx_user_workspace ON space_tokens(user_id, workspace_key);

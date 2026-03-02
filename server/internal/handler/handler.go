@@ -45,11 +45,15 @@ func (s *Server) Router(authMW, rateLimitMW func(http.Handler) http.Handler) htt
 	// Create space — no auth (bootstrap endpoint).
 	r.Post("/api/spaces", s.createSpace)
 
+	// Create user — no auth (bootstrap endpoint).
+	r.Post("/api/users", s.createUser)
+
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
 		r.Use(authMW)
 
 		// Space management.
+		r.Post("/api/spaces/provision", s.provisionSpace)
 		r.Post("/api/spaces/{spaceID}/tokens", s.addToken)
 		r.Get("/api/spaces/{spaceID}/info", s.getSpaceInfo)
 

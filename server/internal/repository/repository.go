@@ -38,9 +38,14 @@ type MemoryRepo interface {
 	ListBootstrap(ctx context.Context, spaceID string, limit int) ([]domain.Memory, error)
 }
 
-// SpaceTokenRepo defines storage operations for space tokens.
 type SpaceTokenRepo interface {
 	CreateToken(ctx context.Context, st *domain.SpaceToken) error
 	GetByToken(ctx context.Context, token string) (*domain.SpaceToken, error)
 	ListBySpace(ctx context.Context, spaceID string) ([]domain.SpaceToken, error)
+	GetByUserWorkspace(ctx context.Context, userID, workspaceKey string) (*domain.SpaceToken, error)
+}
+
+type UserTokenRepo interface {
+	CreateToken(ctx context.Context, ut *domain.UserToken) error
+	GetByToken(ctx context.Context, token string) (*domain.UserToken, error)
 }

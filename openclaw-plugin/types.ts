@@ -8,9 +8,10 @@ export interface PluginConfig {
   // Server mode (apiUrl present → server)
   apiUrl?: string;
   apiToken?: string;
+  userToken?: string;
 
   // Agent identity for CRDT vector clock (server mode only).
-  // Defaults to "agent" if not set.
+  // Defaults to "agent" if not set. Overridden by ctx.agentId at runtime.
   agentName?: string;
 
   // Auto-embedding via TiDB EMBED_TEXT() — takes priority over client-side embedding.

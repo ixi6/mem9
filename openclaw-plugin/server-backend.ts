@@ -118,6 +118,7 @@ export class ServerBackend implements MemoryBackend {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.token}`,
       "Content-Type": "application/json",
+      "X-Mnemo-Agent-Id": this.agentName,
     };
     return fetch(url, {
       method,

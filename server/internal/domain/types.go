@@ -36,14 +36,22 @@ type WriteResult struct {
 	Merged    bool   // true when concurrent writes were resolved by section merge
 }
 
-// SpaceToken maps an API token to a space and identifies an agent.
-type SpaceToken struct {
+type UserToken struct {
 	APIToken  string    `json:"api_token"`
-	SpaceID   string    `json:"space_id"`
-	SpaceName string    `json:"space_name"`
-	AgentName string    `json:"agent_name"`
-	AgentType string    `json:"agent_type,omitempty"`
+	UserID    string    `json:"user_id"`
+	UserName  string    `json:"user_name"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type SpaceToken struct {
+	APIToken     string    `json:"api_token"`
+	SpaceID      string    `json:"space_id"`
+	SpaceName    string    `json:"space_name"`
+	AgentName    string    `json:"agent_name"`
+	AgentType    string    `json:"agent_type,omitempty"`
+	UserID       string    `json:"user_id,omitempty"`
+	WorkspaceKey string    `json:"workspace_key,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // SpaceInfo is the response for GET /api/spaces/:id/info.
@@ -60,10 +68,10 @@ type AgentInfo struct {
 	AgentType string `json:"agent_type,omitempty"`
 }
 
-// AuthInfo is extracted from the bearer token and carried in context.
 type AuthInfo struct {
 	SpaceID   string
 	AgentName string
+	UserID    string
 }
 
 // MemoryFilter encapsulates search/list query parameters.
