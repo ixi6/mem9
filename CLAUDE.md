@@ -140,14 +140,21 @@ If a user asks to install or set up the claude-plugin, read `claude-plugin/READM
 
 ## Installing the OpenCode plugin
 
-If a user asks to install mnemo for OpenCode, read `opencode-plugin/README.md` for the full guide. Quick summary:
+If a user asks to install mnemo for OpenCode, read `opencode-plugin/README.md` for the full guide.
+
+**npm plugin (recommended):**
+
+1. Add to `opencode.json`: `{"plugin": ["mnemo-opencode"]}`
+2. Set env vars:
+   - **Direct mode** (default): `MNEMO_DB_HOST`, `MNEMO_DB_USER`, `MNEMO_DB_PASS`
+   - **Server mode**: `MNEMO_API_URL` and `MNEMO_API_TOKEN`
+3. Restart OpenCode — plugin auto-installs from npm and logs `[mnemo] Direct mode...` or `[mnemo] Server mode...`
+
+**From source (alternative):**
 
 1. `cd opencode-plugin && npm install`
 2. Add to `opencode.json`: `{"plugins": {"mnemo": {"path": "/absolute/path/to/mnemos/opencode-plugin"}}}`
-3. Set env vars:
-   - **Direct mode** (default): `MNEMO_DB_HOST`, `MNEMO_DB_USER`, `MNEMO_DB_PASS`
-   - **Server mode**: `MNEMO_API_URL` and `MNEMO_API_TOKEN`
-4. Plugin auto-detects mode and logs `[mnemo] Direct mode...` or `[mnemo] Server mode...` on startup
+3. Set env vars (same as above)
 
 ## Installing the OpenClaw plugin
 

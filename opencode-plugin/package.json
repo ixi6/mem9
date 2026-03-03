@@ -1,18 +1,43 @@
 {
   "name": "mnemo-opencode",
   "version": "0.1.0",
-  "description": "Mnemo memory plugin for OpenCode — automatic capture and recall of shared AI agent memories",
+  "description": "OpenCode memory plugin — cloud-persistent AI agent memory with hybrid vector + keyword search via TiDB Serverless or mnemo-server",
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "license": "Apache-2.0",
+  "author": "qiffang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qiffang/mnemos.git",
+    "directory": "opencode-plugin"
+  },
+  "homepage": "https://github.com/qiffang/mnemos/tree/main/opencode-plugin#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "memory",
+    "agent-memory",
+    "tidb",
+    "vector-search",
+    "persistent-memory",
+    "ai-agent"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "1.2.15"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
     "typescript": "^5.8.0"
-  },
-  "files": [
-    "src"
-  ],
-  "license": "Apache-2.0"
+  }
 }

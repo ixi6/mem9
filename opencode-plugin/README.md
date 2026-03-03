@@ -31,24 +31,29 @@ Session Idle Event → Auto-capture session marker
 
 ## Installation
 
-### 1. Clone this repo
+### Method A: npm plugin (Recommended)
+
+The simplest way — OpenCode auto-installs npm plugins at startup.
+
+Add to your `opencode.json`:
+
+```json
+{
+  "plugin": ["mnemo-opencode"]
+}
+```
+
+That's it. OpenCode will install `mnemo-opencode` from npm automatically on next startup.
+
+### Method B: From source
 
 ```bash
 git clone https://github.com/qiffang/mnemos.git
 cd mnemos/opencode-plugin
-```
-
-### 2. Install dependencies
-
-```bash
 npm install
-# or
-bun install
 ```
 
-### 3. Register the plugin in your OpenCode config
-
-Add the plugin to your project's `opencode.json` (or global OpenCode config):
+Then register in `opencode.json`:
 
 ```json
 {
@@ -60,7 +65,7 @@ Add the plugin to your project's `opencode.json` (or global OpenCode config):
 }
 ```
 
-### 4. Set environment variables
+### Set environment variables
 
 #### Option A: Direct Mode (default — TiDB Serverless)
 
@@ -92,7 +97,7 @@ The plugin auto-detects the mode:
 - `MNEMO_DB_HOST` set → **Direct mode**
 - `MNEMO_API_URL` set → **Server mode**
 
-### 5. Verify
+### Verify
 
 Start OpenCode in your project. You should see one of these log lines:
 
