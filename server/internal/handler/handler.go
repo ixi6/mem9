@@ -3,28 +3,92 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
+	"github.com/qiffang/mnemos/server/internal/embed"
+	"github.com/qiffang/mnemos/server/internal/llm"
 	"github.com/qiffang/mnemos/server/internal/middleware"
+	"github.com/qiffang/mnemos/server/internal/repository/tidb"
 	"github.com/qiffang/mnemos/server/internal/service"
 )
 
 // Server holds the HTTP handlers and their dependencies.
 type Server struct {
-	memory *service.MemoryService
-	space  *service.SpaceService
-	logger *slog.Logger
+	tenant *service.TenantService
+	// Dependencies for creating tenant-mode services on-the-fly.
+	embedder   *embed.Embedder
+	llmClient  *llm.Client
+	autoModel  string
+	ingestMode service.IngestMode
+	logger     *slog.Logger
+	svcCache   sync.Map
 }
 
 // NewServer creates a new HTTP handler server.
-func NewServer(memory *service.MemoryService, space *service.SpaceService, logger *slog.Logger) *Server {
-	return &Server{memory: memory, space: space, logger: logger}
+func NewServer(
+	tenantSvc *service.TenantService,
+	embedder *embed.Embedder,
+	llmClient *llm.Client,
+	autoModel string,
+	ingestMode service.IngestMode,
+	logger *slog.Logger,
+) *Server {
+	return &Server{
+		tenant:     tenantSvc,
+		embedder:   embedder,
+		llmClient:  llmClient,
+		autoModel:  autoModel,
+		ingestMode: ingestMode,
+		logger:     logger,
+	}
+}
+
+// resolvedSvc holds the correct service instances for a request.
+// Services are always backed by the tenant's dedicated DB.
+type resolvedSvc struct {
+	memory *service.MemoryService
+	ingest *service.IngestService
+}
+
+type tenantSvcKey string
+
+// resolveServices returns the correct services for a request.
+func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+	if auth.TenantID == "" {
+		// Defensive path: currently unreachable in production because auth middleware
+		// always sets TenantID for valid tokens. Kept for future unauthenticated routes
+		// (e.g., health-check handlers that bypass auth) and test harnesses.
+		key := tenantSvcKey(fmt.Sprintf("db-%p", auth.TenantDB))
+		if cached, ok := s.svcCache.Load(key); ok {
+			return cached.(resolvedSvc)
+		}
+		memRepo := tidb.NewMemoryRepo(auth.TenantDB, s.autoModel)
+		svc := resolvedSvc{
+			memory: service.NewMemoryService(memRepo, s.embedder, s.autoModel, memRepo.FTSAvailable()),
+			ingest: service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+		}
+		s.svcCache.Store(key, svc)
+		return svc
+	}
+	key := tenantSvcKey(auth.TenantID)
+	if cached, ok := s.svcCache.Load(key); ok {
+		return cached.(resolvedSvc)
+	}
+	memRepo := tidb.NewMemoryRepo(auth.TenantDB, s.autoModel)
+	svc := resolvedSvc{
+		memory: service.NewMemoryService(memRepo, s.embedder, s.autoModel, memRepo.FTSAvailable()),
+		ingest: service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+	}
+	s.svcCache.Store(key, svc)
+	return svc
 }
 
 // Router builds the chi router with all routes and middleware.
@@ -42,20 +106,12 @@ func (s *Server) Router(authMW, rateLimitMW func(http.Handler) http.Handler) htt
 		respond(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Create space — no auth (bootstrap endpoint).
-	r.Post("/api/spaces", s.createSpace)
-
-	// Create user — no auth (bootstrap endpoint).
-	r.Post("/api/users", s.createUser)
+	// Register tenant — no auth (bootstrap endpoint).
+	r.Post("/api/tenants/register", s.registerTenant)
 
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
 		r.Use(authMW)
-
-		// Space management.
-		r.Post("/api/spaces/provision", s.provisionSpace)
-		r.Post("/api/spaces/{spaceID}/tokens", s.addToken)
-		r.Get("/api/spaces/{spaceID}/info", s.getSpaceInfo)
 
 		// Memory CRUD.
 		r.Post("/api/memories", s.createMemory)
@@ -65,6 +121,11 @@ func (s *Server) Router(authMW, rateLimitMW func(http.Handler) http.Handler) htt
 		r.Get("/api/memories/{id}", s.getMemory)
 		r.Put("/api/memories/{id}", s.updateMemory)
 		r.Delete("/api/memories/{id}", s.deleteMemory)
+		r.Post("/api/memories/ingest", s.ingestMemories)
+
+		// Tenant management.
+		r.Post("/api/tenants/{tenantID}/tokens", s.addTenantToken)
+		r.Get("/api/tenants/{tenantID}/info", s.getTenantInfo)
 	})
 
 	return r

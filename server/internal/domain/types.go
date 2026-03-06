@@ -1,85 +1,136 @@
 package domain
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
+)
+
+// MemoryType classifies how a memory was created.
+type MemoryType string
+
+const (
+	TypePinned  MemoryType = "pinned"
+	TypeInsight MemoryType = "insight"
+	TypeDigest  MemoryType = "digest"
+)
+
+// MemoryState represents the lifecycle state of a memory.
+type MemoryState string
+
+const (
+	StateActive   MemoryState = "active"
+	StatePaused   MemoryState = "paused"
+	StateArchived MemoryState = "archived"
+	StateDeleted  MemoryState = "deleted"
 )
 
 // Memory represents a piece of shared knowledge stored in a space.
 type Memory struct {
-	ID        string          `json:"id"`
-	SpaceID   string          `json:"-"`
-	Content   string          `json:"content"`
-	KeyName   string          `json:"key,omitempty"`
-	Source    string          `json:"source,omitempty"`
-	Tags      []string        `json:"tags,omitempty"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
-	Embedding []float32       `json:"-"`
-	Version   int             `json:"version"`
-	UpdatedBy string          `json:"updated_by,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Score     *float64        `json:"score,omitempty"`
+	ID         string          `json:"id"`
+	Content    string          `json:"content"`
+	MemoryType MemoryType      `json:"memory_type"`
+	Source     string          `json:"source,omitempty"`
+	Tags       []string        `json:"tags,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+	Embedding  []float32       `json:"-"`
 
-	VectorClock map[string]uint64 `json:"clock,omitempty"`
-	OriginAgent string            `json:"origin_agent,omitempty"`
-	Tombstone   bool              `json:"tombstone"`
-	WriteID     string            `json:"-"`
-}
+	AgentID      string `json:"agent_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	UpdatedBy    string `json:"updated_by,omitempty"`
+	SupersededBy string `json:"superseded_by,omitempty"`
 
-// WriteResult is returned by the service layer to the handler for CRDT-aware writes.
-// It is never serialized directly to the HTTP response body.
-type WriteResult struct {
-	Memory    *Memory
-	Dominated bool   // true when incoming write lost to existing
-	Winner    string // origin_agent of the winning record
-	Merged    bool   // true when concurrent writes were resolved by section merge
-}
+	State     MemoryState `json:"state"`
+	Version   int         `json:"version"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
 
-type UserToken struct {
-	APIToken  string    `json:"api_token"`
-	UserID    string    `json:"user_id"`
-	UserName  string    `json:"user_name"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type SpaceToken struct {
-	APIToken     string    `json:"api_token"`
-	SpaceID      string    `json:"space_id"`
-	SpaceName    string    `json:"space_name"`
-	AgentName    string    `json:"agent_name"`
-	AgentType    string    `json:"agent_type,omitempty"`
-	UserID       string    `json:"user_id,omitempty"`
-	WorkspaceKey string    `json:"workspace_key,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-// SpaceInfo is the response for GET /api/spaces/:id/info.
-type SpaceInfo struct {
-	SpaceID     string      `json:"space_id"`
-	SpaceName   string      `json:"space_name"`
-	MemoryCount int         `json:"memory_count"`
-	Agents      []AgentInfo `json:"agents"`
-}
-
-// AgentInfo describes one agent in a space.
-type AgentInfo struct {
-	AgentName string `json:"agent_name"`
-	AgentType string `json:"agent_type,omitempty"`
+	Score *float64 `json:"score,omitempty"`
 }
 
 type AuthInfo struct {
-	SpaceID   string
 	AgentName string
-	UserID    string
+
+	// Dedicated-cluster model (non-empty when using tenant token)
+	TenantID string
+	TenantDB *sql.DB
 }
 
 // MemoryFilter encapsulates search/list query parameters.
 type MemoryFilter struct {
-	Query  string
-	Tags   []string
-	Source string
-	Key    string
-	Limit  int
-	Offset int
+	Query      string
+	Tags       []string
+	Source     string
+	State      string
+	MemoryType string
+	AgentID    string
+	SessionID  string
+	Limit      int
+	Offset     int
+}
+
+// TenantStatus represents the lifecycle status of a tenant.
+type TenantStatus string
+
+const (
+	TenantProvisioning TenantStatus = "provisioning"
+	TenantActive       TenantStatus = "active"
+	TenantSuspended    TenantStatus = "suspended"
+	TenantDeleted      TenantStatus = "deleted"
+)
+
+// Tenant represents a provisioned customer with a dedicated TiDB cluster.
+type Tenant struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+
+	// Connection info (never exposed in API responses)
+	DBHost     string `json:"-"`
+	DBPort     int    `json:"-"`
+	DBUser     string `json:"-"`
+	DBPassword string `json:"-"`
+	DBName     string `json:"-"`
+	DBTLS      bool   `json:"-"`
+
+	// Provisioning metadata
+	Provider  string `json:"provider"`
+	ClusterID string `json:"cluster_id,omitempty"`
+	ClaimURL  string `json:"claim_url,omitempty"`
+
+	// Lifecycle
+	Status        TenantStatus `json:"status"`
+	SchemaVersion int          `json:"schema_version"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+	DeletedAt     *time.Time   `json:"-"`
+}
+
+// DSN builds a MySQL connection string for this tenant's database.
+func (t *Tenant) DSN() string {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
+		t.DBUser, t.DBPassword, t.DBHost, t.DBPort, t.DBName)
+	if t.DBTLS {
+		dsn += "&tls=true"
+	}
+	return dsn
+}
+
+// TenantToken represents an API token bound to a tenant.
+type TenantToken struct {
+	APIToken  string    `json:"api_token"`
+	TenantID  string    `json:"tenant_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TenantInfo is the response for GET /api/tenants/{id}/info.
+type TenantInfo struct {
+	TenantID    string       `json:"tenant_id"`
+	Name        string       `json:"name"`
+	Status      TenantStatus `json:"status"`
+	Provider    string       `json:"provider"`
+	ClaimURL    string       `json:"claim_url,omitempty"`
+	AgentCount  int          `json:"agent_count"`
+	MemoryCount int          `json:"memory_count"`
+	CreatedAt   time.Time    `json:"created_at"`
 }

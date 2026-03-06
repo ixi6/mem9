@@ -3,15 +3,16 @@
  *
  * Provides automatic memory recall and capture via OpenClaw's hook system:
  * - before_prompt_build: inject relevant memories into every LLM call
+ *   (grouped by type: pinned → insights → digests)
  * - after_compaction: invalidate cache so post-compact prompts get fresh memories
  * - before_reset: save session context before /reset wipes it
- * - agent_end: auto-capture important information from the conversation
+ * - agent_end: auto-capture via smart pipeline with size-aware message selection
  *
  * Reference: OpenClaw's built-in memory-lancedb extension uses the same pattern.
  */
 
 import type { MemoryBackend } from "./backend.js";
-import type { Memory } from "./types.js";
+import type { Memory, IngestMessage } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -23,6 +24,10 @@ const MIN_PROMPT_LEN = 5; // skip very short prompts
 const AUTO_CAPTURE_SOURCE = "openclaw-auto";
 const MAX_CONTENT_LEN = 500; // truncate individual memory content in prompt
 
+// Ingest defaults — configurable via maxIngestBytes in plugin config
+const DEFAULT_MAX_INGEST_BYTES = 200_000; // ~200KB safe for most LLM context windows
+const MAX_INGEST_MESSAGES = 20; // absolute cap even if small messages
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -30,6 +35,7 @@ const MAX_CONTENT_LEN = 500; // truncate individual memory content in prompt
 interface CacheEntry {
   memories: Memory[];
   ts: number;
+  queryHash: string;
 }
 
 /** Minimal logger — matches OpenClaw's PluginLogger shape. */
@@ -48,6 +54,40 @@ interface HookApi {
 }
 
 // ---------------------------------------------------------------------------
+// Message selection (size-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * Select messages from the end of the conversation, newest first,
+ * until we hit the byte budget or message cap.
+ *
+ * Always includes at least 1 message (even if it alone exceeds the budget).
+ */
+function selectMessages(
+  messages: IngestMessage[],
+  maxBytes: number = DEFAULT_MAX_INGEST_BYTES,
+  maxCount: number = MAX_INGEST_MESSAGES,
+): IngestMessage[] {
+  let totalBytes = 0;
+  const selected: IngestMessage[] = [];
+
+  // Walk backwards from most recent
+  for (let i = messages.length - 1; i >= 0 && selected.length < maxCount; i--) {
+    const msg = messages[i];
+    const msgBytes = new TextEncoder().encode(msg.content).byteLength;
+
+    if (totalBytes + msgBytes > maxBytes && selected.length > 0) {
+      break; // Would exceed budget, stop (but always include at least 1)
+    }
+
+    selected.unshift(msg); // Maintain chronological order
+    totalBytes += msgBytes;
+  }
+
+  return selected;
+}
+
+// ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
@@ -58,17 +98,61 @@ function escapeForPrompt(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/**
+ * Format memories for injection, grouped by type for maximum comprehension:
+ * 1. Pinned memories first (user-explicit preferences)
+ * 2. Insights (extracted facts)
+ * 3. Digests (session context)
+ */
 function formatMemoriesBlock(memories: Memory[]): string {
   if (memories.length === 0) return "";
 
-  const lines = memories.map((m, i) => {
+  // Group by memory_type, falling back to "pinned" for legacy memories
+  const pinned: Memory[] = [];
+  const insights: Memory[] = [];
+  const digests: Memory[] = [];
+  const other: Memory[] = [];
+
+  for (const m of memories) {
+    const mtype = m.memory_type ?? "pinned";
+    switch (mtype) {
+      case "pinned": pinned.push(m); break;
+      case "insight": insights.push(m); break;
+      case "digest": digests.push(m); break;
+      default: other.push(m); break;
+    }
+  }
+
+  const lines: string[] = [];
+  let idx = 1;
+
+  const formatMem = (m: Memory): string => {
     const tags = m.tags?.length ? ` [${m.tags.join(", ")}]` : "";
     const key = m.key ? ` (${m.key})` : "";
     const content = m.content.length > MAX_CONTENT_LEN
       ? m.content.slice(0, MAX_CONTENT_LEN) + "..."
       : m.content;
-    return `${i + 1}.${key}${tags} ${escapeForPrompt(content)}`;
-  });
+    return `${idx++}.${key}${tags} ${escapeForPrompt(content)}`;
+  };
+
+  if (pinned.length > 0) {
+    lines.push("[Preferences]");
+    for (const m of pinned) lines.push(formatMem(m));
+  }
+  if (insights.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("[Knowledge]");
+    for (const m of insights) lines.push(formatMem(m));
+  }
+  if (digests.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("[Recent Sessions]");
+    for (const m of digests) lines.push(formatMem(m));
+  }
+  if (other.length > 0) {
+    if (lines.length > 0) lines.push("");
+    for (const m of other) lines.push(formatMem(m));
+  }
 
   return [
     "<relevant-memories>",
@@ -79,6 +163,25 @@ function formatMemoriesBlock(memories: Memory[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Context stripping (prevent re-ingesting injected memories)
+// ---------------------------------------------------------------------------
+
+function stripInjectedContext(content: string): string {
+  let s = content;
+  for (;;) {
+    const start = s.indexOf("<relevant-memories>");
+    if (start === -1) break;
+    const end = s.indexOf("</relevant-memories>");
+    if (end === -1) {
+      s = s.slice(0, start);
+      break;
+    }
+    s = s.slice(0, start) + s.slice(end + "</relevant-memories>".length);
+  }
+  return s.trim();
+}
+
+// ---------------------------------------------------------------------------
 // Hook registration
 // ---------------------------------------------------------------------------
 
@@ -86,21 +189,28 @@ export function registerHooks(
   api: HookApi,
   backend: MemoryBackend,
   logger: Logger,
+  options?: { maxIngestBytes?: number },
 ): void {
+  const maxIngestBytes = options?.maxIngestBytes ?? DEFAULT_MAX_INGEST_BYTES;
+
   // Cache scoped to this plugin instance.
+  // NOTE: queryHash is the full prompt string, so cache only hits on exact repeated
+  // prompts within CACHE_TTL_MS. Hit rate is ~0% for normal interactive use;
+  // the TTL exists as a safety net for repeated identical prompts.
   let memoryCache: CacheEntry | null = null;
 
-  function getCached(): Memory[] | null {
+  function getCached(prompt: string): Memory[] | null {
     if (!memoryCache) return null;
     if (Date.now() - memoryCache.ts > CACHE_TTL_MS) {
       memoryCache = null;
       return null;
     }
+    if (memoryCache.queryHash !== prompt) return null;
     return memoryCache.memories;
   }
 
-  function setCache(memories: Memory[]): void {
-    memoryCache = { memories, ts: Date.now() };
+  function setCache(memories: Memory[], prompt: string): void {
+    memoryCache = { memories, ts: Date.now(), queryHash: prompt };
   }
 
   function invalidateCache(): void {
@@ -119,11 +229,11 @@ export function registerHooks(
         if (!prompt || prompt.length < MIN_PROMPT_LEN) return;
 
         // Check cache first — avoid querying DB on every turn
-        let memories = getCached();
+        let memories = getCached(prompt);
         if (!memories) {
           const result = await backend.search({ q: prompt, limit: MAX_INJECT });
           memories = result.data ?? [];
-          setCache(memories);
+          setCache(memories, prompt);
         }
 
         if (memories.length === 0) return;
@@ -179,7 +289,6 @@ export function registerHooks(
 
       await backend.store({
         content: `[session-summary] ${summary}`,
-        key: `session:reset:${Date.now()}`,
         source: AUTO_CAPTURE_SOURCE,
         tags: ["auto-capture", "session-summary", "pre-reset"],
       });
@@ -193,27 +302,35 @@ export function registerHooks(
   });
 
   // --------------------------------------------------------------------------
-  // agent_end — auto-capture important info from the conversation
+  // agent_end — auto-capture via smart ingest pipeline
+  //
+  // Size-aware message selection: walk backwards from most recent messages,
+  // accumulating until byte budget is hit. Then POST to /api/memories/ingest
+  // for server-side LLM extraction + reconciliation.
   // --------------------------------------------------------------------------
   api.on("agent_end", async (event: unknown) => {
     try {
-      const evt = event as { success?: boolean; messages?: unknown[] };
+      const evt = event as {
+        success?: boolean;
+        messages?: unknown[];
+        sessionId?: string;
+        agentId?: string;
+      };
       if (!evt?.success || !evt.messages || evt.messages.length === 0) return;
 
-      // Find the last assistant message
-      let lastAssistantContent = "";
-      for (let i = evt.messages.length - 1; i >= 0; i--) {
-        const msg = evt.messages[i];
+      // Format raw messages into IngestMessage format
+      const formatted: IngestMessage[] = [];
+      for (const msg of evt.messages) {
         if (!msg || typeof msg !== "object") continue;
         const m = msg as Record<string, unknown>;
-        if (m.role !== "assistant") continue;
+        const role = typeof m.role === "string" ? m.role : "";
+        if (!role) continue;
 
+        let content = "";
         if (typeof m.content === "string") {
-          lastAssistantContent = m.content;
-          break;
-        }
-        // Handle array content blocks
-        if (Array.isArray(m.content)) {
+          content = m.content;
+        } else if (Array.isArray(m.content)) {
+          // Handle array content blocks (e.g., Claude's content blocks)
           for (const block of m.content) {
             if (
               block &&
@@ -221,33 +338,50 @@ export function registerHooks(
               (block as Record<string, unknown>).type === "text" &&
               typeof (block as Record<string, unknown>).text === "string"
             ) {
-              lastAssistantContent = (block as Record<string, unknown>).text as string;
+              content += (block as Record<string, unknown>).text as string;
             }
           }
-          break;
+        }
+
+        if (!content) continue;
+
+        // Strip previously injected memory context to prevent re-ingestion
+        const cleaned = stripInjectedContext(content);
+        if (cleaned) {
+          formatted.push({ role, content: cleaned });
         }
       }
 
-      // Only capture substantial responses (not "ok", "done", etc.)
-      if (lastAssistantContent.length < 50) return;
+      if (formatted.length === 0) return;
 
-      // Skip if it looks like injected memory context
-      if (lastAssistantContent.includes("<relevant-memories>")) return;
+      // Size-aware message selection (200KB budget by default)
+      const selected = selectMessages(formatted, maxIngestBytes);
 
-      // Truncate for storage
-      const content = lastAssistantContent.length > 2000
-        ? lastAssistantContent.slice(0, 2000) + "..."
-        : lastAssistantContent;
+      if (selected.length === 0) return;
 
-      await backend.store({
-        content: `[auto] ${content}`,
-        key: `agent-end:${Date.now()}`,
-        source: AUTO_CAPTURE_SOURCE,
-        tags: ["auto-capture", "agent-response"],
+      const sessionId = typeof evt.sessionId === "string"
+        ? evt.sessionId
+        : `ses_${Date.now()}`;
+
+      const agentId = typeof evt.agentId === "string"
+        ? evt.agentId
+        : AUTO_CAPTURE_SOURCE;
+
+      // POST to ingest endpoint — server handles LLM extraction + reconciliation
+      const result = await backend.ingest({
+        messages: selected,
+        session_id: sessionId,
+        agent_id: agentId,
+        mode: "smart",
       });
 
-      // Invalidate cache so next prompt picks up the new memory
       invalidateCache();
+
+      if (result.digest_stored || result.insights_added > 0) {
+        logger.info(
+          `[mnemo] Ingested session: digest=${result.digest_stored}, insights=${result.insights_added}, status=${result.status}`
+        );
+      }
     } catch {
       // Best-effort — never fail the agent end phase
     }

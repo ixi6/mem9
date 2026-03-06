@@ -9,6 +9,7 @@ import (
 
 	"github.com/qiffang/mnemos/server/internal/domain"
 	"github.com/qiffang/mnemos/server/internal/repository"
+	"github.com/qiffang/mnemos/server/internal/tenant"
 )
 
 type contextKey string
@@ -17,7 +18,11 @@ const authInfoKey contextKey = "authInfo"
 
 const AgentIDHeader = "X-Mnemo-Agent-Id"
 
-func Auth(spaceTokens repository.SpaceTokenRepo, userTokens repository.UserTokenRepo) func(http.Handler) http.Handler {
+func Auth(
+	tenantTokens repository.TenantTokenRepo,
+	tenantRepo repository.TenantRepo,
+	pool *tenant.TenantPool,
+) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearerToken(r)
@@ -26,7 +31,7 @@ func Auth(spaceTokens repository.SpaceTokenRepo, userTokens repository.UserToken
 				return
 			}
 
-			info, err := resolveToken(r.Context(), token, spaceTokens, userTokens)
+			info, err := resolveToken(r.Context(), token, tenantTokens, tenantRepo, pool)
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "invalid token")
 				return
@@ -42,25 +47,32 @@ func Auth(spaceTokens repository.SpaceTokenRepo, userTokens repository.UserToken
 	}
 }
 
-func resolveToken(ctx context.Context, token string, spaceTokens repository.SpaceTokenRepo, userTokens repository.UserTokenRepo) (*domain.AuthInfo, error) {
-	st, err := spaceTokens.GetByToken(ctx, token)
-	if err == nil {
-		return &domain.AuthInfo{
-			SpaceID:   st.SpaceID,
-			AgentName: st.AgentName,
-			UserID:    st.UserID,
-		}, nil
-	}
-	if !errors.Is(err, domain.ErrNotFound) {
-		return nil, err
-	}
-
-	ut, err := userTokens.GetByToken(ctx, token)
+func resolveToken(
+	ctx context.Context,
+	token string,
+	tenantTokens repository.TenantTokenRepo,
+	tenantRepo repository.TenantRepo,
+	pool *tenant.TenantPool,
+) (*domain.AuthInfo, error) {
+	tt, err := tenantTokens.GetByToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
+
+	t, tErr := tenantRepo.GetByID(ctx, tt.TenantID)
+	if tErr != nil {
+		return nil, tErr
+	}
+	if t.Status != domain.TenantActive {
+		return nil, errors.New("tenant not active")
+	}
+	db, dbErr := pool.Get(ctx, t.ID, t.DSN())
+	if dbErr != nil {
+		return nil, dbErr
+	}
 	return &domain.AuthInfo{
-		UserID: ut.UserID,
+		TenantID: tt.TenantID,
+		TenantDB: db,
 	}, nil
 }
 

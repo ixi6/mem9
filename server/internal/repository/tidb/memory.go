@@ -76,19 +76,21 @@ func probeFTS(db *sql.DB) bool {
 
 func (r *MemoryRepo) FTSAvailable() bool { return r.ftsAvailable }
 
-const allColumns = `id, space_id, content, key_name, source, tags, metadata, embedding, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone`
+const allColumns = `id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at, superseded_by`
 
 func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
 	tagsJSON := marshalTags(m.Tags)
-	clockJSON := marshalClock(m.VectorClock)
+	memoryType := string(m.MemoryType)
+	if memoryType == "" {
+		memoryType = string(domain.TypePinned)
+	}
 	if r.autoModel != "" {
 		_, err := r.db.ExecContext(ctx,
-			`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, 0)`,
-			m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-			tagsJSON, nullJSON(m.Metadata),
+			`INSERT INTO memories (id, content, source, tags, metadata, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`,
+			m.ID, m.Content, nullString(m.Source),
+			tagsJSON, nullJSON(m.Metadata), memoryType, nullString(m.AgentID), nullString(m.SessionID),
 			m.Version, nullString(m.UpdatedBy),
-			clockJSON, nullString(m.OriginAgent),
 		)
 		if err != nil {
 			return fmt.Errorf("create memory: %w", err)
@@ -96,12 +98,11 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
 		return nil
 	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, embedding, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, 0)`,
-		m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-		tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding),
+		`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`,
+		m.ID, m.Content, nullString(m.Source),
+		tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID),
 		m.Version, nullString(m.UpdatedBy),
-		clockJSON, nullString(m.OriginAgent),
 	)
 	if err != nil {
 		return fmt.Errorf("create memory: %w", err)
@@ -109,68 +110,9 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
 	return nil
 }
 
-func (r *MemoryRepo) Upsert(ctx context.Context, m *domain.Memory) error {
-	tagsJSON := marshalTags(m.Tags)
-	clockJSON := marshalClock(m.VectorClock)
-	if r.autoModel != "" {
-		_, err := r.db.ExecContext(ctx,
-			`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW(), ?, ?, 0)
-			 ON DUPLICATE KEY UPDATE
-			   content = VALUES(content),
-			   source = VALUES(source),
-			   tags = VALUES(tags),
-			   metadata = VALUES(metadata),
-			   version = version + 1,
-			   updated_by = VALUES(updated_by),
-			   updated_at = NOW(),
-			   origin_agent = VALUES(origin_agent),
-			   tombstone = 0`,
-			m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-			tagsJSON, nullJSON(m.Metadata),
-			nullString(m.UpdatedBy),
-			clockJSON, nullString(m.OriginAgent),
-		)
-		if err != nil {
-			return fmt.Errorf("upsert memory: %w", err)
-		}
-		return nil
-	}
-	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, embedding, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW(), ?, ?, 0)
-		 ON DUPLICATE KEY UPDATE
-		   content = VALUES(content),
-		   source = VALUES(source),
-		   tags = VALUES(tags),
-		   metadata = VALUES(metadata),
-		   embedding = VALUES(embedding),
-		   version = version + 1,
-		   updated_by = VALUES(updated_by),
-		   updated_at = NOW(),
-		   origin_agent = VALUES(origin_agent),
-		   tombstone = 0`,
-		m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-		tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding),
-		nullString(m.UpdatedBy),
-		clockJSON, nullString(m.OriginAgent),
-	)
-	if err != nil {
-		return fmt.Errorf("upsert memory: %w", err)
-	}
-	return nil
-}
-
-func (r *MemoryRepo) GetByID(ctx context.Context, spaceID, id string) (*domain.Memory, error) {
+func (r *MemoryRepo) GetByID(ctx context.Context, id string) (*domain.Memory, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT `+allColumns+` FROM memories WHERE id = ? AND space_id = ? AND tombstone = 0`, id, spaceID,
-	)
-	return scanMemory(row)
-}
-
-func (r *MemoryRepo) GetByKey(ctx context.Context, spaceID, keyName string) (*domain.Memory, error) {
-	row := r.db.QueryRowContext(ctx,
-		`SELECT `+allColumns+` FROM memories WHERE space_id = ? AND key_name = ? AND tombstone = 0`, spaceID, keyName,
+		`SELECT `+allColumns+` FROM memories WHERE id = ? AND state = 'active'`, id,
 	)
 	return scanMemory(row)
 }
@@ -181,15 +123,14 @@ func (r *MemoryRepo) UpdateOptimistic(ctx context.Context, m *domain.Memory, exp
 	var query string
 	var args []any
 	if r.autoModel != "" {
-		query = `UPDATE memories SET content = ?, key_name = ?, tags = ?, metadata = ?, version = version + 1, updated_by = ?, updated_at = NOW()
-			 WHERE id = ? AND space_id = ?`
-		args = []any{m.Content, nullString(m.KeyName), tagsJSON, nullJSON(m.Metadata), nullString(m.UpdatedBy), m.ID, m.SpaceID}
+		query = `UPDATE memories SET content = ?, tags = ?, metadata = ?, version = version + 1, updated_by = ?, updated_at = NOW()
+			 WHERE id = ?`
+		args = []any{m.Content, tagsJSON, nullJSON(m.Metadata), nullString(m.UpdatedBy), m.ID}
 	} else {
-		query = `UPDATE memories SET content = ?, key_name = ?, tags = ?, metadata = ?, embedding = ?, version = version + 1, updated_by = ?, updated_at = NOW()
-			 WHERE id = ? AND space_id = ?`
-		args = []any{m.Content, nullString(m.KeyName), tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding), nullString(m.UpdatedBy), m.ID, m.SpaceID}
+		query = `UPDATE memories SET content = ?, tags = ?, metadata = ?, embedding = ?, version = version + 1, updated_by = ?, updated_at = NOW()
+			 WHERE id = ?`
+		args = []any{m.Content, tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding), nullString(m.UpdatedBy), m.ID}
 	}
-
 	if expectedVersion > 0 {
 		query += " AND version = ?"
 		args = append(args, expectedVersion)
@@ -206,19 +147,18 @@ func (r *MemoryRepo) UpdateOptimistic(ctx context.Context, m *domain.Memory, exp
 	return nil
 }
 
-func (r *MemoryRepo) SoftDelete(ctx context.Context, spaceID, id, agentName string) error {
+func (r *MemoryRepo) SoftDelete(ctx context.Context, id, agentName string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("soft delete begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	var tombstone bool
-	var clockJSON []byte
+	var state sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT tombstone, vector_clock FROM memories WHERE id = ? AND space_id = ? FOR UPDATE`,
-		id, spaceID,
-	).Scan(&tombstone, &clockJSON)
+		`SELECT state FROM memories WHERE id = ? FOR UPDATE`,
+		id,
+	).Scan(&state)
 	if err == sql.ErrNoRows {
 		return domain.ErrNotFound
 	}
@@ -226,20 +166,12 @@ func (r *MemoryRepo) SoftDelete(ctx context.Context, spaceID, id, agentName stri
 		return fmt.Errorf("soft delete lock row: %w", err)
 	}
 
-	if tombstone {
+	if state.String == string(domain.StateDeleted) {
 		return nil
 	}
-
-	clock := unmarshalClock(clockJSON)
-	if clock == nil {
-		clock = make(map[string]uint64)
-	}
-	clock[agentName]++
-	newClockJSON := marshalClock(clock)
-
 	_, err = tx.ExecContext(ctx,
-		`UPDATE memories SET tombstone = 1, vector_clock = ?, updated_at = NOW() WHERE id = ? AND space_id = ?`,
-		newClockJSON, id, spaceID,
+		`UPDATE memories SET state = 'deleted', updated_at = NOW() WHERE id = ?`,
+		id,
 	)
 	if err != nil {
 		return fmt.Errorf("soft delete update: %w", err)
@@ -248,216 +180,86 @@ func (r *MemoryRepo) SoftDelete(ctx context.Context, spaceID, id, agentName stri
 	return tx.Commit()
 }
 
-const (
-	maxCRDTRetries    = 3
-	crdtRetryBaseWait = 50 * time.Millisecond
-)
-
-func (r *MemoryRepo) CRDTUpsert(
-	ctx context.Context,
-	spaceID, keyName string,
-	incoming *domain.Memory,
-	decide func(existing *domain.Memory) (*domain.Memory, bool, error),
-) (*domain.Memory, bool, error) {
-	var result *domain.Memory
-	var dominated bool
-
-	for attempt := 0; attempt < maxCRDTRetries; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * crdtRetryBaseWait)
-		}
-
-		r, d, err := r.crdtUpsertOnce(ctx, spaceID, keyName, incoming, decide)
-		if err != nil {
-			if isDeadlock(err) {
-				continue
-			}
-			return nil, false, err
-		}
-		result = r
-		dominated = d
-		return result, dominated, nil
-	}
-
-	return nil, false, domain.ErrWriteConflict
-}
-
-func (r *MemoryRepo) crdtUpsertOnce(
-	ctx context.Context,
-	spaceID, keyName string,
-	incoming *domain.Memory,
-	decide func(existing *domain.Memory) (*domain.Memory, bool, error),
-) (*domain.Memory, bool, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("crdt upsert begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	var existing *domain.Memory
-	row := tx.QueryRowContext(ctx,
-		`SELECT `+allColumns+`, last_write_id, last_write_snapshot, last_write_status
-		 FROM memories WHERE space_id = ? AND key_name = ? FOR UPDATE`,
-		spaceID, keyName,
+func (r *MemoryRepo) ArchiveMemory(ctx context.Context, id, supersededBy string) error {
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE memories SET state = 'archived', superseded_by = ?, updated_at = NOW()
+		 WHERE id = ? AND state = 'active'`,
+		supersededBy, id,
 	)
-
-	existing, lastWriteID, lastWriteSnapshot, lastWriteStatus, err := scanMemoryForUpdate(row)
-	if err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return nil, false, fmt.Errorf("crdt upsert lock: %w", err)
-	}
-
-	if incoming.WriteID != "" && existing != nil && lastWriteID == incoming.WriteID {
-		snap, snapErr := deserializeSnapshot(lastWriteSnapshot)
-		if snapErr == nil && snap != nil {
-			return snap, lastWriteStatus == 200, nil
-		}
-	}
-
-	toWrite, dominated, err := decide(existing)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if dominated && existing != nil {
-		if incoming.WriteID != "" {
-			_ = r.storeWriteSnapshot(ctx, tx, existing, incoming.WriteID, 200)
-		}
-		return existing, true, tx.Commit()
-	}
-
-	tagsJSON := marshalTags(toWrite.Tags)
-	clockJSON := marshalClock(toWrite.VectorClock)
-
-	if existing == nil {
-		if r.autoModel != "" {
-			_, err = tx.ExecContext(ctx,
-				`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW(), ?, ?, 0)`,
-				toWrite.ID, spaceID, toWrite.Content, nullString(keyName), nullString(toWrite.Source),
-				tagsJSON, nullJSON(toWrite.Metadata),
-				nullString(toWrite.UpdatedBy),
-				clockJSON, nullString(toWrite.OriginAgent),
-			)
-		} else {
-			_, err = tx.ExecContext(ctx,
-				`INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, embedding, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW(), ?, ?, 0)`,
-				toWrite.ID, spaceID, toWrite.Content, nullString(keyName), nullString(toWrite.Source),
-				tagsJSON, nullJSON(toWrite.Metadata), vecToString(toWrite.Embedding),
-				nullString(toWrite.UpdatedBy),
-				clockJSON, nullString(toWrite.OriginAgent),
-			)
-		}
-	} else {
-		if r.autoModel != "" {
-			_, err = tx.ExecContext(ctx,
-				`UPDATE memories SET content = ?, source = ?, tags = ?, metadata = ?,
-				 version = version + 1, updated_by = ?, updated_at = NOW(),
-				 vector_clock = ?, origin_agent = ?, tombstone = 0
-				 WHERE space_id = ? AND key_name = ?`,
-				toWrite.Content, nullString(toWrite.Source), tagsJSON, nullJSON(toWrite.Metadata),
-				nullString(toWrite.UpdatedBy),
-				clockJSON, nullString(toWrite.OriginAgent),
-				spaceID, keyName,
-			)
-		} else {
-			_, err = tx.ExecContext(ctx,
-				`UPDATE memories SET content = ?, source = ?, tags = ?, metadata = ?, embedding = ?,
-				 version = version + 1, updated_by = ?, updated_at = NOW(),
-				 vector_clock = ?, origin_agent = ?, tombstone = 0
-				 WHERE space_id = ? AND key_name = ?`,
-				toWrite.Content, nullString(toWrite.Source), tagsJSON, nullJSON(toWrite.Metadata),
-				vecToString(toWrite.Embedding), nullString(toWrite.UpdatedBy),
-				clockJSON, nullString(toWrite.OriginAgent),
-				spaceID, keyName,
-			)
-		}
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("crdt upsert write: %w", err)
-	}
-
-	if incoming.WriteID != "" {
-		_ = r.storeWriteSnapshot(ctx, tx, toWrite, incoming.WriteID, 201)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, false, fmt.Errorf("crdt upsert commit: %w", err)
-	}
-
-	written, err := r.GetByKey(ctx, spaceID, keyName)
-	if err != nil {
-		return toWrite, false, nil
-	}
-	return written, false, nil
-}
-
-func (r *MemoryRepo) storeWriteSnapshot(ctx context.Context, tx *sql.Tx, m *domain.Memory, writeID string, status int) error {
-	snapshot, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx,
-		`UPDATE memories SET last_write_id = ?, last_write_snapshot = ?, last_write_status = ?
-		 WHERE id = ?`,
-		writeID, snapshot, status, m.ID,
-	)
-	return err
+	if n, _ := result.RowsAffected(); n == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
-func scanMemoryForUpdate(row *sql.Row) (*domain.Memory, string, []byte, int, error) {
-	var m domain.Memory
-	var keyName, source, updatedBy, originAgent, lastWriteIDNull sql.NullString
-	var tagsJSON, metadataJSON, embeddingStr, clockJSON, snapshotBytes []byte
-	var lastWriteStatus sql.NullInt32
+func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, supersededBy string, newMem *domain.Memory) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
 
-	err := row.Scan(&m.ID, &m.SpaceID, &m.Content, &keyName, &source,
-		&tagsJSON, &metadataJSON, &embeddingStr, &m.Version, &updatedBy, &m.CreatedAt, &m.UpdatedAt,
-		&clockJSON, &originAgent, &m.Tombstone,
-		&lastWriteIDNull, &snapshotBytes, &lastWriteStatus)
-	if err == sql.ErrNoRows {
-		return nil, "", nil, 0, domain.ErrNotFound
+	result, err := tx.ExecContext(ctx,
+		`UPDATE memories SET state = 'archived', superseded_by = ?, updated_at = NOW()
+		 WHERE id = ? AND state = 'active'`,
+		supersededBy, archiveID,
+	)
+	if err != nil {
+		return fmt.Errorf("archive old memory: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return domain.ErrNotFound
+	}
+
+	tagsJSON := marshalTags(newMem.Tags)
+	memoryType := string(newMem.MemoryType)
+	if memoryType == "" {
+		memoryType = string(domain.TypePinned)
+	}
+
+	if r.autoModel != "" {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO memories (id, content, source, tags, metadata, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`,
+			newMem.ID, newMem.Content, nullString(newMem.Source),
+			tagsJSON, nullJSON(newMem.Metadata), memoryType, nullString(newMem.AgentID), nullString(newMem.SessionID),
+			newMem.Version, nullString(newMem.UpdatedBy),
+		)
+	} else {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`,
+			newMem.ID, newMem.Content, nullString(newMem.Source),
+			tagsJSON, nullJSON(newMem.Metadata), vecToString(newMem.Embedding), memoryType, nullString(newMem.AgentID), nullString(newMem.SessionID),
+			newMem.Version, nullString(newMem.UpdatedBy),
+		)
 	}
 	if err != nil {
-		return nil, "", nil, 0, fmt.Errorf("scan memory for update: %w", err)
-	}
-	m.KeyName = keyName.String
-	m.Source = source.String
-	m.UpdatedBy = updatedBy.String
-	m.OriginAgent = originAgent.String
-	m.Tags = unmarshalTags(tagsJSON)
-	m.Metadata = unmarshalRawJSON(metadataJSON)
-	m.VectorClock = unmarshalClock(clockJSON)
-
-	status := 0
-	if lastWriteStatus.Valid {
-		status = int(lastWriteStatus.Int32)
+		return fmt.Errorf("create new memory: %w", err)
 	}
 
-	return &m, lastWriteIDNull.String, snapshotBytes, status, nil
+	return tx.Commit()
 }
 
-func deserializeSnapshot(data []byte) (*domain.Memory, error) {
-	if len(data) == 0 || string(data) == "null" {
-		return nil, nil
+func (r *MemoryRepo) SetState(ctx context.Context, id string, state domain.MemoryState) error {
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE memories SET state = ?, updated_at = NOW() WHERE id = ? AND state = 'active'`,
+		string(state), id,
+	)
+	if err != nil {
+		return err
 	}
-	var m domain.Memory
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
+	if n, _ := result.RowsAffected(); n == 0 {
+		return domain.ErrNotFound
 	}
-	return &m, nil
+	return nil
 }
 
-func isDeadlock(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
-	}
-	return false
-}
-
-func (r *MemoryRepo) List(ctx context.Context, spaceID string, f domain.MemoryFilter) ([]domain.Memory, int, error) {
-	where, args := buildWhere(spaceID, f)
+func (r *MemoryRepo) List(ctx context.Context, f domain.MemoryFilter) ([]domain.Memory, int, error) {
+	where, args := r.buildWhere(f)
 
 	// Count total matches.
 	var total int
@@ -500,10 +302,10 @@ func (r *MemoryRepo) List(ctx context.Context, spaceID string, f domain.MemoryFi
 	return memories, total, rows.Err()
 }
 
-func (r *MemoryRepo) Count(ctx context.Context, spaceID string) (int, error) {
+func (r *MemoryRepo) Count(ctx context.Context) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE space_id = ? AND tombstone = 0`, spaceID,
+		`SELECT COUNT(*) FROM memories WHERE state = 'active'`,
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count memories: %w", err)
@@ -511,13 +313,13 @@ func (r *MemoryRepo) Count(ctx context.Context, spaceID string) (int, error) {
 	return count, nil
 }
 
-func (r *MemoryRepo) ListBootstrap(ctx context.Context, spaceID string, limit int) ([]domain.Memory, error) {
+func (r *MemoryRepo) ListBootstrap(ctx context.Context, limit int) ([]domain.Memory, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT `+allColumns+` FROM memories WHERE space_id = ? AND tombstone = 0 ORDER BY updated_at DESC LIMIT ?`,
-		spaceID, limit,
+		`SELECT `+allColumns+` FROM memories WHERE state = 'active' ORDER BY updated_at DESC LIMIT ?`,
+		limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list bootstrap: %w", err)
@@ -544,11 +346,11 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory) 
 
 	var stmtSQL string
 	if r.autoModel != "" {
-		stmtSQL = `INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, 0)`
+		stmtSQL = `INSERT INTO memories (id, content, source, tags, metadata, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`
 	} else {
-		stmtSQL = `INSERT INTO memories (id, space_id, content, key_name, source, tags, metadata, embedding, version, updated_by, created_at, updated_at, vector_clock, origin_agent, tombstone)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, 0)`
+		stmtSQL = `INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, state, version, updated_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())`
 	}
 
 	stmt, err := tx.PrepareContext(ctx, stmtSQL)
@@ -559,21 +361,22 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory) 
 
 	for _, m := range memories {
 		tagsJSON := marshalTags(m.Tags)
-		clockJSON := marshalClock(m.VectorClock)
+		memoryType := string(m.MemoryType)
+		if memoryType == "" {
+			memoryType = string(domain.TypePinned)
+		}
 		var execErr error
 		if r.autoModel != "" {
 			_, execErr = stmt.ExecContext(ctx,
-				m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-				tagsJSON, nullJSON(m.Metadata),
+				m.ID, m.Content, nullString(m.Source),
+				tagsJSON, nullJSON(m.Metadata), memoryType, nullString(m.AgentID), nullString(m.SessionID),
 				m.Version, nullString(m.UpdatedBy),
-				clockJSON, nullString(m.OriginAgent),
 			)
 		} else {
 			_, execErr = stmt.ExecContext(ctx,
-				m.ID, m.SpaceID, m.Content, nullString(m.KeyName), nullString(m.Source),
-				tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding),
+				m.ID, m.Content, nullString(m.Source),
+				tagsJSON, nullJSON(m.Metadata), vecToString(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID),
 				m.Version, nullString(m.UpdatedBy),
-				clockJSON, nullString(m.OriginAgent),
 			)
 		}
 		if execErr != nil {
@@ -589,13 +392,13 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory) 
 
 // VectorSearch performs ANN search using cosine distance.
 // VEC_COSINE_DISTANCE must appear identically in SELECT and ORDER BY for TiDB VECTOR INDEX usage.
-func (r *MemoryRepo) VectorSearch(ctx context.Context, spaceID string, queryVec []float32, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
+func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
 	vecStr := vecToString(queryVec)
 	if vecStr == nil {
 		return nil, nil
 	}
 
-	conds, args := buildFilterConds(spaceID, f)
+	conds, args := r.buildFilterConds(f)
 	conds = append(conds, "embedding IS NOT NULL")
 
 	where := strings.Join(conds, " AND ")
@@ -629,8 +432,8 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, spaceID string, queryVec 
 	return memories, rows.Err()
 }
 
-func (r *MemoryRepo) AutoVectorSearch(ctx context.Context, spaceID string, queryText string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
-	conds, args := buildFilterConds(spaceID, f)
+func (r *MemoryRepo) AutoVectorSearch(ctx context.Context, queryText string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
+	conds, args := r.buildFilterConds(f)
 	conds = append(conds, "embedding IS NOT NULL")
 
 	where := strings.Join(conds, " AND ")
@@ -664,8 +467,8 @@ func (r *MemoryRepo) AutoVectorSearch(ctx context.Context, spaceID string, query
 }
 
 // KeywordSearch performs substring search on content.
-func (r *MemoryRepo) KeywordSearch(ctx context.Context, spaceID string, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
-	conds, args := buildFilterConds(spaceID, f)
+func (r *MemoryRepo) KeywordSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
+	conds, args := r.buildFilterConds(f)
 	if query != "" {
 		conds = append(conds, "content LIKE CONCAT('%', ?, '%')")
 		args = append(args, query)
@@ -693,9 +496,9 @@ func (r *MemoryRepo) KeywordSearch(ctx context.Context, spaceID string, query st
 }
 
 // FTSSearch performs full-text search using FTS_MATCH_WORD with BM25 ranking.
-// Server-mode contract: includes tombstone = 0.
-func (r *MemoryRepo) FTSSearch(ctx context.Context, spaceID string, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
-	conds, args := buildFilterConds(spaceID, f)
+// Server-mode contract: includes state = 'active'.
+func (r *MemoryRepo) FTSSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
+	conds, args := r.buildFilterConds(f)
 	where := strings.Join(conds, " AND ")
 
 	sqlQuery := `SELECT ` + allColumns + `, fts_match_word(?, content) AS fts_score
@@ -726,8 +529,8 @@ func (r *MemoryRepo) FTSSearch(ctx context.Context, spaceID string, query string
 	return memories, rows.Err()
 }
 
-func buildWhere(spaceID string, f domain.MemoryFilter) (string, []any) {
-	conds, args := buildFilterConds(spaceID, f)
+func (r *MemoryRepo) buildWhere(f domain.MemoryFilter) (string, []any) {
+	conds, args := r.buildFilterConds(f)
 	if f.Query != "" {
 		conds = append(conds, "content LIKE ?")
 		args = append(args, "%"+f.Query+"%")
@@ -736,17 +539,45 @@ func buildWhere(spaceID string, f domain.MemoryFilter) (string, []any) {
 }
 
 // buildFilterConds builds WHERE conditions without the keyword query (shared by vector/keyword search).
-func buildFilterConds(spaceID string, f domain.MemoryFilter) ([]string, []any) {
-	conds := []string{"space_id = ?", "tombstone = 0"}
-	args := []any{spaceID}
+func (r *MemoryRepo) buildFilterConds(f domain.MemoryFilter) ([]string, []any) {
+	conds := []string{}
+	args := []any{}
 
+	if f.State == "all" {
+		// no state filter
+	} else if f.State != "" {
+		conds = append(conds, "state = ?")
+		args = append(args, f.State)
+	} else {
+		conds = append(conds, "state = 'active'")
+	}
+
+	if f.MemoryType != "" {
+		types := strings.Split(f.MemoryType, ",")
+		if len(types) == 1 {
+			conds = append(conds, "memory_type = ?")
+			args = append(args, types[0])
+		} else {
+			placeholders := make([]string, len(types))
+			for i, t := range types {
+				placeholders[i] = "?"
+				args = append(args, strings.TrimSpace(t))
+			}
+			conds = append(conds, "memory_type IN ("+strings.Join(placeholders, ",")+")")
+		}
+	}
+
+	if f.AgentID != "" {
+		conds = append(conds, "agent_id = ?")
+		args = append(args, f.AgentID)
+	}
+	if f.SessionID != "" {
+		conds = append(conds, "session_id = ?")
+		args = append(args, f.SessionID)
+	}
 	if f.Source != "" {
 		conds = append(conds, "source = ?")
 		args = append(args, f.Source)
-	}
-	if f.Key != "" {
-		conds = append(conds, "key_name = ?")
-		args = append(args, f.Key)
 	}
 	for _, tag := range f.Tags {
 		tagJSON, err := json.Marshal(tag)
@@ -756,77 +587,104 @@ func buildFilterConds(spaceID string, f domain.MemoryFilter) ([]string, []any) {
 		conds = append(conds, "JSON_CONTAINS(tags, ?)")
 		args = append(args, string(tagJSON))
 	}
+	if len(conds) == 0 {
+		conds = append(conds, "1=1")
+	}
 	return conds, args
 }
 
 // scanMemory scans a single row into a Memory.
 func scanMemory(row *sql.Row) (*domain.Memory, error) {
 	var m domain.Memory
-	var keyName, source, updatedBy, originAgent sql.NullString
-	var tagsJSON, metadataJSON, embeddingStr, clockJSON []byte
+	var source, memoryType, agentID, sessionID, state, updatedBy, supersededBy sql.NullString
+	var tagsJSON, metadataJSON, embeddingStr []byte
 
-	err := row.Scan(&m.ID, &m.SpaceID, &m.Content, &keyName, &source,
-		&tagsJSON, &metadataJSON, &embeddingStr, &m.Version, &updatedBy, &m.CreatedAt, &m.UpdatedAt,
-		&clockJSON, &originAgent, &m.Tombstone)
+	err := row.Scan(&m.ID, &m.Content, &source,
+		&tagsJSON, &metadataJSON, &embeddingStr, &memoryType, &agentID, &sessionID, &state, &m.Version, &updatedBy,
+		&m.CreatedAt, &m.UpdatedAt, &supersededBy)
 	if err == sql.ErrNoRows {
 		return nil, domain.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan memory: %w", err)
 	}
-	m.KeyName = keyName.String
 	m.Source = source.String
+	m.MemoryType = domain.MemoryType(memoryType.String)
+	if m.MemoryType == "" {
+		m.MemoryType = domain.TypePinned
+	}
+	m.AgentID = agentID.String
+	m.SessionID = sessionID.String
+	m.State = domain.MemoryState(state.String)
+	if m.State == "" {
+		m.State = domain.StateActive
+	}
 	m.UpdatedBy = updatedBy.String
-	m.OriginAgent = originAgent.String
+	m.SupersededBy = supersededBy.String
 	m.Tags = unmarshalTags(tagsJSON)
 	m.Metadata = unmarshalRawJSON(metadataJSON)
-	m.VectorClock = unmarshalClock(clockJSON)
 	return &m, nil
 }
 
 // scanMemoryRows scans from *sql.Rows (used by List and KeywordSearch).
 func scanMemoryRows(rows *sql.Rows) (*domain.Memory, error) {
 	var m domain.Memory
-	var keyName, source, updatedBy, originAgent sql.NullString
-	var tagsJSON, metadataJSON, embeddingStr, clockJSON []byte
+	var source, memoryType, agentID, sessionID, state, updatedBy, supersededBy sql.NullString
+	var tagsJSON, metadataJSON, embeddingStr []byte
 
-	err := rows.Scan(&m.ID, &m.SpaceID, &m.Content, &keyName, &source,
-		&tagsJSON, &metadataJSON, &embeddingStr, &m.Version, &updatedBy, &m.CreatedAt, &m.UpdatedAt,
-		&clockJSON, &originAgent, &m.Tombstone)
+	err := rows.Scan(&m.ID, &m.Content, &source,
+		&tagsJSON, &metadataJSON, &embeddingStr, &memoryType, &agentID, &sessionID, &state, &m.Version, &updatedBy,
+		&m.CreatedAt, &m.UpdatedAt, &supersededBy)
 	if err != nil {
 		return nil, fmt.Errorf("scan memory row: %w", err)
 	}
-	m.KeyName = keyName.String
 	m.Source = source.String
+	m.MemoryType = domain.MemoryType(memoryType.String)
+	if m.MemoryType == "" {
+		m.MemoryType = domain.TypePinned
+	}
+	m.AgentID = agentID.String
+	m.SessionID = sessionID.String
+	m.State = domain.MemoryState(state.String)
+	if m.State == "" {
+		m.State = domain.StateActive
+	}
 	m.UpdatedBy = updatedBy.String
-	m.OriginAgent = originAgent.String
+	m.SupersededBy = supersededBy.String
 	m.Tags = unmarshalTags(tagsJSON)
 	m.Metadata = unmarshalRawJSON(metadataJSON)
-	m.VectorClock = unmarshalClock(clockJSON)
 	return &m, nil
 }
 
 // scanMemoryRowsWithDistance scans a row that includes a trailing distance column (used by VectorSearch).
 func scanMemoryRowsWithDistance(rows *sql.Rows) (*domain.Memory, error) {
 	var m domain.Memory
-	var keyName, source, updatedBy, originAgent sql.NullString
-	var tagsJSON, metadataJSON, embeddingStr, clockJSON []byte
+	var source, memoryType, agentID, sessionID, state, updatedBy, supersededBy sql.NullString
+	var tagsJSON, metadataJSON, embeddingStr []byte
 	var distance float64
 
-	err := rows.Scan(&m.ID, &m.SpaceID, &m.Content, &keyName, &source,
-		&tagsJSON, &metadataJSON, &embeddingStr, &m.Version, &updatedBy, &m.CreatedAt, &m.UpdatedAt,
-		&clockJSON, &originAgent, &m.Tombstone,
+	err := rows.Scan(&m.ID, &m.Content, &source,
+		&tagsJSON, &metadataJSON, &embeddingStr, &memoryType, &agentID, &sessionID, &state, &m.Version, &updatedBy,
+		&m.CreatedAt, &m.UpdatedAt, &supersededBy,
 		&distance)
 	if err != nil {
 		return nil, fmt.Errorf("scan memory row with distance: %w", err)
 	}
-	m.KeyName = keyName.String
 	m.Source = source.String
+	m.MemoryType = domain.MemoryType(memoryType.String)
+	if m.MemoryType == "" {
+		m.MemoryType = domain.TypePinned
+	}
+	m.AgentID = agentID.String
+	m.SessionID = sessionID.String
+	m.State = domain.MemoryState(state.String)
+	if m.State == "" {
+		m.State = domain.StateActive
+	}
 	m.UpdatedBy = updatedBy.String
-	m.OriginAgent = originAgent.String
+	m.SupersededBy = supersededBy.String
 	m.Tags = unmarshalTags(tagsJSON)
 	m.Metadata = unmarshalRawJSON(metadataJSON)
-	m.VectorClock = unmarshalClock(clockJSON)
 	score := 1 - distance
 	m.Score = &score
 	return &m, nil
@@ -835,24 +693,32 @@ func scanMemoryRowsWithDistance(rows *sql.Rows) (*domain.Memory, error) {
 // scanMemoryRowsWithFTSScore scans a row that includes a trailing fts_score column (used by FTSSearch).
 func scanMemoryRowsWithFTSScore(rows *sql.Rows) (*domain.Memory, error) {
 	var m domain.Memory
-	var keyName, source, updatedBy, originAgent sql.NullString
-	var tagsJSON, metadataJSON, embeddingStr, clockJSON []byte
+	var source, memoryType, agentID, sessionID, state, updatedBy, supersededBy sql.NullString
+	var tagsJSON, metadataJSON, embeddingStr []byte
 	var ftsScore float64
 
-	err := rows.Scan(&m.ID, &m.SpaceID, &m.Content, &keyName, &source,
-		&tagsJSON, &metadataJSON, &embeddingStr, &m.Version, &updatedBy, &m.CreatedAt, &m.UpdatedAt,
-		&clockJSON, &originAgent, &m.Tombstone,
+	err := rows.Scan(&m.ID, &m.Content, &source,
+		&tagsJSON, &metadataJSON, &embeddingStr, &memoryType, &agentID, &sessionID, &state, &m.Version, &updatedBy,
+		&m.CreatedAt, &m.UpdatedAt, &supersededBy,
 		&ftsScore)
 	if err != nil {
 		return nil, fmt.Errorf("scan memory row with fts score: %w", err)
 	}
-	m.KeyName = keyName.String
 	m.Source = source.String
+	m.MemoryType = domain.MemoryType(memoryType.String)
+	if m.MemoryType == "" {
+		m.MemoryType = domain.TypePinned
+	}
+	m.AgentID = agentID.String
+	m.SessionID = sessionID.String
+	m.State = domain.MemoryState(state.String)
+	if m.State == "" {
+		m.State = domain.StateActive
+	}
 	m.UpdatedBy = updatedBy.String
-	m.OriginAgent = originAgent.String
+	m.SupersededBy = supersededBy.String
 	m.Tags = unmarshalTags(tagsJSON)
 	m.Metadata = unmarshalRawJSON(metadataJSON)
-	m.VectorClock = unmarshalClock(clockJSON)
 	m.Score = &ftsScore
 	return &m, nil
 }
@@ -917,29 +783,4 @@ func vecToString(embedding []float32) any {
 	}
 	sb.WriteByte(']')
 	return sb.String()
-}
-
-func marshalClock(clock map[string]uint64) []byte {
-	if len(clock) == 0 {
-		return []byte("{}")
-	}
-	b, err := json.Marshal(clock)
-	if err != nil {
-		return []byte("{}")
-	}
-	return b
-}
-
-func unmarshalClock(data []byte) map[string]uint64 {
-	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
-		return nil
-	}
-	var clock map[string]uint64
-	if err := json.Unmarshal(data, &clock); err != nil {
-		return nil
-	}
-	if len(clock) == 0 {
-		return nil
-	}
-	return clock
 }

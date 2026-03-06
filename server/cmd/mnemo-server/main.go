@@ -12,9 +12,11 @@ import (
 	"github.com/qiffang/mnemos/server/internal/config"
 	"github.com/qiffang/mnemos/server/internal/embed"
 	"github.com/qiffang/mnemos/server/internal/handler"
+	"github.com/qiffang/mnemos/server/internal/llm"
 	"github.com/qiffang/mnemos/server/internal/middleware"
 	"github.com/qiffang/mnemos/server/internal/repository/tidb"
 	"github.com/qiffang/mnemos/server/internal/service"
+	"github.com/qiffang/mnemos/server/internal/tenant"
 )
 
 func main() {
@@ -47,29 +49,45 @@ func main() {
 	} else {
 		logger.Info("no embedding configured, keyword-only search active")
 	}
+	// LLM client (nil if not configured → raw ingest mode).
+	llmClient := llm.New(llm.Config{
+		APIKey:      cfg.LLMAPIKey,
+		BaseURL:     cfg.LLMBaseURL,
+		Model:       cfg.LLMModel,
+		Temperature: cfg.LLMTemperature,
+	})
+	if llmClient != nil {
+		logger.Info("LLM configured for smart ingest", "model", cfg.LLMModel)
+	} else {
+		logger.Info("no LLM configured, ingest will use raw mode")
+	}
 
 	// Repositories.
-	memoryRepo := tidb.NewMemoryRepo(db, cfg.EmbedAutoModel)
-	if memoryRepo.FTSAvailable() {
-		logger.Info("FTS available (FTS_MATCH_WORD): keyword search will use FTS")
-	} else {
-		logger.Info("FTS unavailable: keyword search will use LIKE fallback")
-	}
-	tokenRepo := tidb.NewSpaceTokenRepo(db)
-	userTokenRepo := tidb.NewUserTokenRepo(db)
+	tenantRepo := tidb.NewTenantRepo(db)
+	tenantTokenRepo := tidb.NewTenantTokenRepo(db)
+	tenantPool := tenant.NewPool(tenant.PoolConfig{
+		MaxIdle:     cfg.TenantPoolMaxIdle,
+		MaxOpen:     cfg.TenantPoolMaxOpen,
+		IdleTimeout: cfg.TenantPoolIdleTimeout,
+		TotalLimit:  cfg.TenantPoolTotalLimit,
+	})
+	defer tenantPool.Close()
 
 	// Services.
-	memorySvc := service.NewMemoryService(memoryRepo, embedder, cfg.EmbedAutoModel, memoryRepo.FTSAvailable())
-	spaceSvc := service.NewSpaceService(tokenRepo, userTokenRepo, memoryRepo)
+	var zeroClient *tenant.ZeroClient
+	if cfg.TiDBZeroEnabled {
+		zeroClient = tenant.NewZeroClient(cfg.TiDBZeroAPIURL)
+	}
+	tenantSvc := service.NewTenantService(tenantRepo, tenantTokenRepo, zeroClient, tenantPool, logger)
 
 	// Middleware.
-	authMW := middleware.Auth(tokenRepo, userTokenRepo)
+	authMW := middleware.Auth(tenantTokenRepo, tenantRepo, tenantPool)
 	rl := middleware.NewRateLimiter(cfg.RateLimit, cfg.RateBurst)
 	defer rl.Stop()
 	rateMW := rl.Middleware()
 
 	// Handler.
-	srv := handler.NewServer(memorySvc, spaceSvc, logger)
+	srv := handler.NewServer(tenantSvc, embedder, llmClient, cfg.EmbedAutoModel, service.IngestMode(cfg.IngestMode), logger)
 	router := srv.Router(authMW, rateMW)
 
 	httpSrv := &http.Server{

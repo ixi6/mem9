@@ -8,6 +8,8 @@ import type {
   CreateMemoryInput,
   UpdateMemoryInput,
   SearchInput,
+  IngestInput,
+  IngestResult,
 } from "./types.js";
 
 function jsonResult(data: unknown) {
@@ -121,7 +123,7 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
       name: "memory_store",
       label: "Store Memory",
       description:
-        "Store a memory. If a key is provided and already exists, the memory is updated (upsert). Returns the stored memory with its assigned id.",
+        "Store a memory. If a key is provided and already exists, the memory is updated (upsert). Key-based upsert is only available in direct mode; server mode ignores the key field. Returns the stored memory with its assigned id.",
       parameters: {
         type: "object",
         properties: {
@@ -131,7 +133,7 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
           },
           key: {
             type: "string",
-            description: "Optional named key for upsert-style lookup",
+            description: "Optional named key for upsert-style lookup (direct-mode only — server mode ignores this)",
           },
           source: {
             type: "string",
@@ -178,7 +180,7 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
             description: "Comma-separated tags to filter by (AND)",
           },
           source: { type: "string", description: "Filter by source agent" },
-          key: { type: "string", description: "Filter by key name" },
+          key: { type: "string", description: "Filter by key name (direct-mode only)" },
           limit: {
             type: "number",
             description: "Max results (default 20, max 200)",
@@ -238,7 +240,7 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
         properties: {
           id: { type: "string", description: "Memory id to update" },
           content: { type: "string", description: "New content" },
-          key: { type: "string", description: "New key name" },
+          key: { type: "string", description: "New key name (direct-mode only)" },
           source: { type: "string", description: "New source" },
           tags: {
             type: "array",
@@ -310,19 +312,32 @@ const mnemoPlugin = {
       api.registerTool(() => tools, {
         names: toolNames,
       });
-      registerHooks(api, backend, api.logger);
+      registerHooks(api, backend, api.logger, { maxIngestBytes: cfg.maxIngestBytes });
       return;
     }
 
     if (cfg.apiUrl) {
-      if (!cfg.userToken) {
-        api.logger.error(
-          "[mnemo] Server mode requires apiUrl and userToken. Plugin disabled."
+      const configuredToken = cfg.apiToken ?? cfg.userToken;
+      const registerTenant = async (agentName: string): Promise<string> => {
+        const tenantName = cfg.tenantName ?? `${agentName}-tenant`;
+        const backend = new ServerBackend(cfg.apiUrl!, "", agentName);
+        const result = await backend.register(tenantName);
+        const claimUrl = result.claim_url ?? "unknown";
+        api.logger.info(
+          `[mnemo] Auto-registered tenant: ${result.tenant_id}, claim your TiDB instance at: ${claimUrl}`
         );
-        return;
-      }
+        return result.token;
+      };
+      let registrationPromise: Promise<string> | null = null;
+      const resolveTenantToken = (agentName: string): Promise<string> => {
+        if (configuredToken) return Promise.resolve(configuredToken);
+        if (!registrationPromise) {
+          registrationPromise = registerTenant(agentName);
+        }
+        return registrationPromise;
+      };
 
-      api.logger.info("[mnemo] Server mode (user token + workspace isolation)");
+      api.logger.info("[mnemo] Server mode (workspace isolation)");
       const spaceTokenCache = new Map<string, string>();
 
       const factory: ToolFactory = (ctx: ToolContext) => {
@@ -338,7 +353,7 @@ const mnemoPlugin = {
         const workspaceKey = hashWorkspaceDir(workspaceDir);
         const backend = new LazyServerBackend(
           cfg.apiUrl!,
-          cfg.userToken!,
+          () => resolveTenantToken(agentId),
           workspaceKey,
           agentId,
           spaceTokenCache,
@@ -353,13 +368,13 @@ const mnemoPlugin = {
       // Uses the default workspace/agent context for hook-triggered operations.
       const hookBackend = new LazyServerBackend(
         cfg.apiUrl!,
-        cfg.userToken!,
+        () => resolveTenantToken(cfg.agentName ?? "agent"),
         hashWorkspaceDir("default"),
         cfg.agentName ?? "agent",
         spaceTokenCache,
         "default::" + (cfg.agentName ?? "agent"),
       );
-      registerHooks(api, hookBackend, api.logger);
+      registerHooks(api, hookBackend, api.logger, { maxIngestBytes: cfg.maxIngestBytes });
       return;
     }
 
@@ -383,7 +398,7 @@ class LazyServerBackend implements MemoryBackend {
 
   constructor(
     private apiUrl: string,
-    private userToken: string,
+    private tokenProvider: () => Promise<string>,
     private workspaceKey: string,
     private agentId: string,
     private cache: Map<string, string>,
@@ -394,16 +409,18 @@ class LazyServerBackend implements MemoryBackend {
     if (this.resolved) return this.resolved;
     if (this.resolving) return this.resolving;
 
-    this.resolving = provisionSpaceToken(
-      this.apiUrl,
-      this.userToken,
-      this.workspaceKey,
-      this.agentId,
-    ).then((spaceToken) => {
-      this.cache.set(this.cacheKey, spaceToken);
-      this.resolved = new ServerBackend(this.apiUrl, spaceToken, this.agentId);
-      return this.resolved;
-    });
+    this.resolving = this.tokenProvider().then((tenantToken) =>
+      provisionSpaceToken(
+        this.apiUrl,
+        tenantToken,
+        this.workspaceKey,
+        this.agentId,
+      ).then((spaceToken) => {
+        this.cache.set(this.cacheKey, spaceToken);
+        this.resolved = new ServerBackend(this.apiUrl, spaceToken, this.agentId);
+        return this.resolved;
+      })
+    );
 
     return this.resolving;
   }
@@ -423,6 +440,8 @@ class LazyServerBackend implements MemoryBackend {
   async remove(id: string) {
     return (await this.resolve()).remove(id);
   }
+  async ingest(input: IngestInput): Promise<IngestResult> {
+    return (await this.resolve()).ingest(input);
+  }
 }
-
 export default mnemoPlugin;

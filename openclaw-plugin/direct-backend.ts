@@ -10,6 +10,8 @@ import type {
   CreateMemoryInput,
   UpdateMemoryInput,
   SearchInput,
+  IngestInput,
+  IngestResult,
 } from "./types.js";
 
 const SPACE_ID = "default";
@@ -265,6 +267,41 @@ export class DirectBackend implements MemoryBackend {
       [id, SPACE_ID]
     );
     return true;
+  }
+
+  /**
+   * Direct mode: no LLM pipeline available. Store raw conversation as a single digest memory.
+   */
+  async ingest(input: IngestInput): Promise<IngestResult> {
+    await this.initialized;
+
+    const content = input.messages
+      .map((m) => `${m.role}: ${m.content}`)
+      .join("\n\n")
+      .trim();
+
+    if (!content) {
+      return {
+        ingest_id: input.ingest_id ?? `ing_direct_${Date.now()}`,
+        status: "complete",
+        digest_stored: false,
+        insights_added: 0,
+      };
+    }
+
+    const mem = await this.store({
+      content: `[session-digest] ${content.slice(0, 5000)}`,
+      source: input.agent_id,
+      tags: ["auto-capture", "session-digest"],
+    });
+
+    return {
+      ingest_id: input.ingest_id ?? `ing_direct_${Date.now()}`,
+      status: "complete",
+      digest_stored: true,
+      digest_id: mem.id,
+      insights_added: 0,
+    };
   }
 
   private buildFilterConditions(input: SearchInput): {

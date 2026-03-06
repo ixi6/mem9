@@ -13,12 +13,9 @@ import (
 )
 
 type createMemoryRequest struct {
-	Content  string            `json:"content"`
-	Key      string            `json:"key,omitempty"`
-	Tags     []string          `json:"tags,omitempty"`
-	Metadata json.RawMessage   `json:"metadata,omitempty"`
-	Clock    map[string]uint64 `json:"clock,omitempty"`
-	WriteID  string            `json:"write_id,omitempty"`
+	Content  string          `json:"content"`
+	Tags     []string        `json:"tags,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
@@ -28,42 +25,15 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Clock != nil {
-		if err := validateClock(req.Clock); err != nil {
-			respondError(w, http.StatusBadRequest, "invalid clock: "+err.Error())
-			return
-		}
-	}
-
 	auth := authInfo(r)
-	result, err := s.memory.Create(r.Context(), auth.SpaceID, auth.AgentName, req.Content, req.Key, req.Tags, req.Metadata, req.Clock, req.WriteID)
+	svc := s.resolveServices(auth)
+	mem, err := svc.memory.Create(r.Context(), auth.AgentName, req.Content, req.Tags, req.Metadata)
 	if err != nil {
 		s.handleError(w, err)
 		return
 	}
 
-	status := http.StatusCreated
-	if result.Dominated {
-		status = http.StatusOK
-		w.Header().Set("X-Mnemo-Dominated", "true")
-	}
-	if result.Merged {
-		w.Header().Set("X-Mnemo-Merged", "true")
-	}
-	if result.Winner != "" {
-		w.Header().Set("X-Mnemo-Winner", result.Winner)
-	}
-
-	respond(w, status, result.Memory)
-}
-
-func validateClock(clock map[string]uint64) error {
-	for k := range clock {
-		if k == "" {
-			return &domain.ValidationError{Message: "clock keys must be non-empty strings"}
-		}
-	}
-	return nil
+	respond(w, http.StatusCreated, mem)
 }
 
 type listResponse struct {
@@ -92,15 +62,18 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filter := domain.MemoryFilter{
-		Query:  q.Get("q"),
-		Tags:   tags,
-		Source: q.Get("source"),
-		Key:    q.Get("key"),
-		Limit:  limit,
-		Offset: offset,
+		Query:      q.Get("q"),
+		Tags:       tags,
+		Source:     q.Get("source"),
+		State:      q.Get("state"),
+		MemoryType: q.Get("memory_type"),
+		AgentID:    q.Get("agent_id"),
+		SessionID:  q.Get("session_id"),
+		Limit:      limit,
+		Offset:     offset,
 	}
-
-	memories, total, err := s.memory.Search(r.Context(), auth.SpaceID, filter)
+	svc := s.resolveServices(auth)
+	memories, total, err := svc.memory.Search(r.Context(), filter)
 	if err != nil {
 		s.handleError(w, err)
 		return
@@ -120,9 +93,10 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) {
 	auth := authInfo(r)
+	svc := s.resolveServices(auth)
 	id := chi.URLParam(r, "id")
 
-	mem, err := s.memory.Get(r.Context(), auth.SpaceID, id)
+	mem, err := svc.memory.Get(r.Context(), id)
 	if err != nil {
 		s.handleError(w, err)
 		return
@@ -145,6 +119,7 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth := authInfo(r)
+	svc := s.resolveServices(auth)
 	id := chi.URLParam(r, "id")
 
 	var ifMatch int
@@ -152,7 +127,7 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
 		ifMatch, _ = strconv.Atoi(h)
 	}
 
-	mem, err := s.memory.Update(r.Context(), auth.SpaceID, auth.AgentName, id, req.Content, req.Tags, req.Metadata, ifMatch)
+	mem, err := svc.memory.Update(r.Context(), auth.AgentName, id, req.Content, req.Tags, req.Metadata, ifMatch)
 	if err != nil {
 		s.handleError(w, err)
 		return
@@ -164,9 +139,10 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteMemory(w http.ResponseWriter, r *http.Request) {
 	auth := authInfo(r)
+	svc := s.resolveServices(auth)
 	id := chi.URLParam(r, "id")
 
-	if err := s.memory.Delete(r.Context(), auth.SpaceID, id, auth.AgentName); err != nil {
+	if err := svc.memory.Delete(r.Context(), id, auth.AgentName); err != nil {
 		s.handleError(w, err)
 		return
 	}
@@ -186,7 +162,8 @@ func (s *Server) bulkCreateMemories(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth := authInfo(r)
-	memories, err := s.memory.BulkCreate(r.Context(), auth.SpaceID, auth.AgentName, req.Memories)
+	svc := s.resolveServices(auth)
+	memories, err := svc.memory.BulkCreate(r.Context(), auth.AgentName, req.Memories)
 	if err != nil {
 		s.handleError(w, err)
 		return
@@ -200,13 +177,14 @@ func (s *Server) bulkCreateMemories(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) bootstrapMemories(w http.ResponseWriter, r *http.Request) {
 	auth := authInfo(r)
+	svc := s.resolveServices(auth)
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = 20
 	}
 
-	memories, err := s.memory.Bootstrap(r.Context(), auth.SpaceID, limit)
+	memories, err := svc.memory.Bootstrap(r.Context(), limit)
 	if err != nil {
 		s.handleError(w, err)
 		return

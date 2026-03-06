@@ -7,9 +7,12 @@ export interface PluginConfig {
 
   // Server mode (apiUrl present → server)
   apiUrl?: string;
+  apiToken?: string;
   userToken?: string;
 
-  // Agent identity for CRDT vector clock (server mode only).
+  tenantName?: string;
+
+  // Agent identity for server mode.
   // Defaults to "agent" if not set. Overridden by ctx.agentId at runtime.
   agentName?: string;
 
@@ -20,6 +23,9 @@ export interface PluginConfig {
 
   // Client-side embedding provider (optional — omit for keyword-only search)
   embedding?: EmbedConfig;
+
+  // Ingest: size-aware message selection for smart pipeline
+  maxIngestBytes?: number;
 }
 
 export interface EmbedConfig {
@@ -32,7 +38,7 @@ export interface EmbedConfig {
 export interface Memory {
   id: string;
   content: string;
-  key?: string | null;
+  key?: string | null;  // direct-mode only — server mode ignores this field
   source?: string | null;
   tags?: string[] | null;
   metadata?: Record<string, unknown> | null;
@@ -41,9 +47,12 @@ export interface Memory {
   created_at: string;
   updated_at: string;
   score?: number;
-  clock?: Record<string, number> | null;
-  origin_agent?: string | null;
-  tombstone?: boolean;
+
+  // Smart memory pipeline (server mode)
+  memory_type?: string;
+  state?: string;
+  agent_id?: string;
+  session_id?: string;
 }
 
 export interface SearchResult {
@@ -55,17 +64,15 @@ export interface SearchResult {
 
 export interface CreateMemoryInput {
   content: string;
-  key?: string;
+  key?: string;    // direct-mode only — server mode ignores this field
   source?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
-  clock?: Record<string, number>;
-  write_id?: string;
 }
 
 export interface UpdateMemoryInput {
   content?: string;
-  key?: string;
+  key?: string;    // direct-mode only — server mode ignores this field
   source?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
@@ -78,4 +85,27 @@ export interface SearchInput {
   key?: string;
   limit?: number;
   offset?: number;
+}
+
+export interface IngestMessage {
+  role: string;
+  content: string;
+}
+
+export interface IngestInput {
+  messages: IngestMessage[];
+  session_id: string;
+  agent_id: string;
+  mode?: "smart" | "extract" | "digest" | "raw";
+  ingest_id?: string;
+}
+
+export interface IngestResult {
+  ingest_id: string;
+  status: "complete" | "partial" | "failed";
+  digest_stored: boolean;
+  digest_id?: string;
+  insights_added: number;
+  insight_ids?: string[];
+  error?: string;
 }
