@@ -59,7 +59,7 @@ mnemo_search() {
   local query="$1"
   local limit="${2:-10}"
   local encoded_q
-  encoded_q=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))" 2>/dev/null || echo "$query")
+  encoded_q=$(printf '%s' "$query" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || echo "$query")
   mnemo_server_get "/api/memories?q=${encoded_q}&limit=${limit}"
 }
 

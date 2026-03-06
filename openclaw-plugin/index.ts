@@ -276,7 +276,10 @@ const mnemoPlugin = {
       const result = await backend.register(tenantName);
       const claimUrl = result.claim_url ?? "unknown";
       api.logger.info(
-        `[mnemo] Auto-registered tenant: ${result.tenant_id}, claim your TiDB instance at: ${claimUrl}`
+        `[mnemo] *** Auto-registered tenant_id=${result.tenant_id} *** Save this token to your config: ${result.token}`
+      );
+      api.logger.info(
+        `[mnemo] Claim your TiDB instance at: ${claimUrl}`
       );
       return result.token;
     };
@@ -290,6 +293,7 @@ const mnemoPlugin = {
     };
 
     api.logger.info("[mnemo] Server mode (workspace isolation)");
+    // NOTE: spaceTokenCache is process-lifetime and grows with distinct workspaces.
     const spaceTokenCache = new Map<string, string>();
 
     const factory: ToolFactory = (ctx: ToolContext) => {
@@ -366,7 +370,10 @@ class LazyServerBackend implements MemoryBackend {
         this.resolved = new ServerBackend(this.apiUrl, spaceToken, this.agentId);
         return this.resolved;
       })
-    );
+    ).catch((err) => {
+      this.resolving = null; // allow retry on next call
+      throw err;
+    });
 
     return this.resolving;
   }

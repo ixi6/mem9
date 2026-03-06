@@ -16,6 +16,12 @@ export interface Memory {
   created_at: string;
   updated_at: string;
   score?: number;
+
+  // Smart memory pipeline fields (server mode)
+  memory_type?: string;
+  state?: string;
+  agent_id?: string;
+  session_id?: string;
 }
 
 export interface SearchResult {

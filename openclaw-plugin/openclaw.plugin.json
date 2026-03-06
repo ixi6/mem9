@@ -10,9 +10,13 @@
         "type": "string",
         "description": "mnemo-server URL (server mode)"
       },
+      "apiToken": {
+        "type": "string",
+        "description": "API token for mnemo-server authentication (preferred over userToken)"
+      },
       "userToken": {
         "type": "string",
-        "description": "User token (enables automatic workspace-based space provisioning)"
+        "description": "User token (legacy alias for apiToken; use apiToken for new setups)"
       }
     }
   },
@@ -20,6 +24,11 @@
     "apiUrl": {
       "label": "Server URL",
       "placeholder": "https://your-server.example.com"
+    },
+    "apiToken": {
+      "label": "API Token",
+      "placeholder": "mnemo_...",
+      "sensitive": true
     },
     "userToken": {
       "label": "User Token",

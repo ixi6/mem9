@@ -35,8 +35,6 @@ try:
         header_parts = []
         if source:
             header_parts.append(f'by {source}')
-        if source:
-            header_parts.append(f'by {source}')
         if tags:
             header_parts.append(f'[{tags}]')
         header = ' | '.join(header_parts)

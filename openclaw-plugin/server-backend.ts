@@ -127,6 +127,7 @@ export class ServerBackend implements MemoryBackend {
       method,
       headers,
       body: body != null ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(8_000),
     });
   }
 

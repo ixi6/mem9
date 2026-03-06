@@ -170,7 +170,10 @@ Defined in `openclaw.plugin.json`:
 | Field | Type | Description |
 |---|---|---|
 | `apiUrl` | string | mnemo-server URL |
-| `userToken` | string | User token created via `POST /api/users` |
+| `apiToken` | string | API token for authentication (preferred) |
+| `userToken` | string | Legacy alias for `apiToken` — works the same way, kept for backward compatibility |
+
+> **Note**: `apiToken` and `userToken` are interchangeable. The plugin checks `apiToken` first, then falls back to `userToken`. For new setups, use `apiToken`.
 
 ## File Structure
 
@@ -190,6 +193,6 @@ openclaw-plugin/
 
 | Problem | Cause | Fix |
 |---|---|---|
-| `No mode configured` | Missing config | Add `apiUrl` and `userToken` to plugin config |
-| `Server mode requires...` | Missing token | Add `userToken` to config |
+| `No mode configured` | Missing config | Add `apiUrl` and `apiToken` (or `userToken`) to plugin config |
+| `Server mode requires...` | Missing token | Add `apiToken` or `userToken` to config |
 | Plugin not loading | Not in memory slot | Set `"slots": {"memory": "mnemo"}` in openclaw.json |

@@ -1,6 +1,6 @@
 # OpenCode Plugin for mnemos
 
-Persistent memory for [OpenCode](https://opencode.ai) — injects memories into system prompt automatically, captures session context on idle, with 5 memory tools.
+Persistent memory for [OpenCode](https://opencode.ai) — injects memories into system prompt automatically, with 5 memory tools.
 
 ## 🚀 Quick Start (server mode)
 
@@ -23,17 +23,14 @@ opencode
 ## How It Works
 
 ```
-System Prompt Transform → Inject recent memories (cached 5min)
+System Prompt Transform → Inject recent memories into system prompt
           ↓
     Agent works normally, can use memory_* tools anytime
-          ↓
-Session Idle Event → Auto-capture session marker
 ```
 
 | Hook / Tool | Trigger | What it does |
 |---|---|---|
-| `system.transform` | Every chat turn | Injects recent memories into system prompt (5-min TTL cache) |
-| `session.idle` event | Session goes idle | Auto-saves a session-end marker as memory |
+| `system.transform` | Every chat turn | Injects recent memories into system prompt |
 | `memory_store` tool | Agent decides | Store a new memory (with optional key for upsert) |
 | `memory_search` tool | Agent decides | Hybrid vector + keyword search (or keyword-only) |
 | `memory_get` tool | Agent decides | Retrieve a single memory by ID |
@@ -120,7 +117,7 @@ opencode-plugin/
     ├── backend.ts         # MemoryBackend interface
     ├── server-backend.ts  # Server mode: mnemo-server REST API
     ├── tools.ts           # 5 memory tools (store/search/get/update/delete)
-    └── hooks.ts           # system.transform + session.idle hooks
+    └── hooks.ts           # system.transform hook (memory injection)
 ```
 
 ## Troubleshooting
