@@ -197,7 +197,7 @@ func (s *IngestService) extractAndReconcile(ctx context.Context, agentName, agen
 func (s *IngestService) extractFacts(ctx context.Context, conversation string) ([]string, error) {
 	currentDate := time.Now().Format("2006-01-02")
 
-	systemPrompt := `You are an information extraction engine. Your task is to identify distinct, 
+	systemPrompt := `You are an information extraction engine. Your task is to identify distinct,
 atomic facts from a conversation and return them as a structured JSON array.
 
 ## Rules
@@ -211,6 +211,38 @@ atomic facts from a conversation and return them as a structured JSON array.
 5. Omit ephemeral information (greetings, filler, debugging chatter with no lasting value).
 6. Omit information that is only relevant to the current task and has no future reuse value.
 7. If no meaningful facts exist in the conversation, return an empty array.
+
+## Examples
+
+Input:
+User: Hi, how are you?
+Assistant: I'm doing well, thank you! How can I help?
+Output: {"facts": []}
+
+Input:
+User: The weather is nice today.
+Assistant: Indeed it is! Enjoy your day.
+Output: {"facts": []}
+
+Input:
+User: I'm looking for a restaurant in San Francisco.
+Assistant: Sure, what cuisine do you prefer?
+Output: {"facts": ["Looking for a restaurant in San Francisco"]}
+
+Input:
+User: Yesterday I had a meeting with John at 3pm. We discussed the new project timeline.
+Assistant: Sounds productive!
+Output: {"facts": ["Had a meeting with John at 3pm", "Discussed the new project timeline with John"]}
+
+Input:
+User: 我叫张明，是一名后端工程师，主要用 Go 和 Python。
+Assistant: 你好张明！
+Output: {"facts": ["名字是张明", "是后端工程师", "主要使用 Go 和 Python"]}
+
+Input:
+User: My favorite movies are Inception and Interstellar. I also love Italian food, especially pizza.
+Assistant: Great taste! Both are amazing films.
+Output: {"facts": ["Favorite movies are Inception and Interstellar", "Loves Italian food, especially pizza"]}
 
 ## Output Format
 
@@ -300,6 +332,28 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 6. When the fact means the same thing as an existing memory (even if worded differently), use NOOP.
 7. Preserve the language of the original facts. Do not translate.
 
+## Examples
+
+Example 1 — ADD new information:
+  Existing memories: [{"id": 0, "text": "Is a software engineer"}]
+  New facts: ["Name is John"]
+  Result: {"memory": [{"id": "0", "text": "Is a software engineer", "event": "NOOP"}, {"id": "new", "text": "Name is John", "event": "ADD"}]}
+
+Example 2 — UPDATE with more detail:
+  Existing memories: [{"id": 0, "text": "Likes to play cricket"}, {"id": 1, "text": "Is a software engineer"}]
+  New facts: ["Loves to play cricket with friends on weekends"]
+  Result: {"memory": [{"id": "0", "text": "Loves to play cricket with friends on weekends", "event": "UPDATE", "old_memory": "Likes to play cricket"}, {"id": "1", "text": "Is a software engineer", "event": "NOOP"}]}
+
+Example 3 — DELETE contradicted information:
+  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  New facts: ["Dislikes cheese pizza"]
+  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "DELETE"}, {"id": "new", "text": "Dislikes cheese pizza", "event": "ADD"}]}
+
+Example 4 — NOOP for equivalent information:
+  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  New facts: ["Name is John"]
+  Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "NOOP"}]}
+
 ## Output Format
 
 Return ONLY valid JSON. No markdown fences.
@@ -325,8 +379,8 @@ Analyze the new facts and determine whether each should be added, updated, or de
 
 	raw, err := s.llm.CompleteJSON(ctx, systemPrompt, userPrompt)
 	if err != nil {
-		slog.Warn("reconciliation LLM call failed, falling back to ADD-all", "err", err)
-		return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+		slog.Warn("reconciliation LLM call failed, skipping to avoid duplicates", "err", err)
+		return nil, 0, nil
 	}
 
 	type reconcileEvent struct {
@@ -345,13 +399,13 @@ Analyze the new facts and determine whether each should be added, updated, or de
 		raw2, retryErr := s.llm.CompleteJSON(ctx, systemPrompt,
 			"Your previous response was not valid JSON. Return ONLY the JSON object.\n\n"+userPrompt)
 		if retryErr != nil {
-			slog.Warn("reconciliation retry failed, falling back to ADD-all", "err", retryErr)
-			return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+			slog.Warn("reconciliation retry failed, skipping to avoid duplicates", "err", retryErr)
+			return nil, 0, nil
 		}
 		parsed, err = llm.ParseJSON[reconcileResponse](raw2)
 		if err != nil {
-			slog.Warn("reconciliation JSON parse failed after retry, falling back to ADD-all", "err", err)
-			return s.addAllFacts(ctx, agentName, agentID, sessionID, facts)
+			slog.Warn("reconciliation JSON parse failed after retry, skipping to avoid duplicates", "err", err)
+			return nil, 0, nil
 		}
 	}
 
@@ -438,11 +492,13 @@ Analyze the new facts and determine whether each should be added, updated, or de
 // Graceful degradation contract: on any search/list failure, the error is logged
 // and that source is skipped. A nil return means all sources failed or the store
 // is empty — the caller (reconcile) will fall through to addAllFacts, which may
-// create duplicates but never loses data.
+// create duplicates but never loses data. With the safer fallback (P1-5), this
+// now returns nil meaning reconciliation is skipped.
 func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID string, facts []string) []domain.Memory {
 	const perFactLimit = 5
 	const contentMaxLen = 150
 	const maxExistingMemories = 60
+	const minSimilarityScore = 0.3 // Skip vector results with score below this threshold
 
 	filter := domain.MemoryFilter{
 		State:      "active",
@@ -469,9 +525,13 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 	seen := make(map[string]struct{})
 	var result []domain.Memory
 
-	addUnseen := func(matches []domain.Memory) {
+	addUnseen := func(matches []domain.Memory, applyThreshold bool) {
 		for _, m := range matches {
 			if _, ok := seen[m.ID]; ok {
+				continue
+			}
+			// Skip low-similarity vector results to avoid polluting LLM context.
+			if applyThreshold && m.Score != nil && *m.Score < minSimilarityScore {
 				continue
 			}
 			seen[m.ID] = struct{}{}
@@ -497,7 +557,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 		if vecErr != nil {
 			slog.Warn("vector search failed during reconcile", "err", vecErr)
 		}
-		addUnseen(vecMatches)
+		addUnseen(vecMatches, true) // Apply similarity threshold to vector results
 
 		// Leg 2: FTS / keyword search — catches exact terms that vector search may miss.
 		var kwMatches []domain.Memory
@@ -510,7 +570,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 		if kwErr != nil {
 			slog.Warn("keyword search failed during reconcile", "err", kwErr)
 		}
-		addUnseen(kwMatches)
+		addUnseen(kwMatches, false) // No threshold for keyword/FTS results
 	}
 
 	if len(result) > maxExistingMemories {

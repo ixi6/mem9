@@ -271,11 +271,11 @@ func setScores(page []domain.Memory, scores map[string]float64) []domain.Memory 
 }
 
 // applyTypeWeights adjusts RRF scores based on memory_type.
-// pinned = 1.2x boost, insight = 1.0x (standard).
+// pinned = 1.5x boost (user-explicit memories), insight = 1.0x (standard).
 func applyTypeWeights(mems map[string]domain.Memory, scores map[string]float64) {
 	for id, m := range mems {
 		if m.MemoryType == domain.TypePinned {
-			scores[id] *= 1.2
+			scores[id] *= 1.5
 		}
 	}
 }

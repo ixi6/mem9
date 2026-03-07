@@ -31,7 +31,7 @@ func TestApplyTypeWeights(t *testing.T) {
 				"insight": 2.0,
 			},
 			want: map[string]float64{
-				"pinned":  1.2,
+				"pinned":  1.5,
 				"insight": 2.0,
 			},
 		},

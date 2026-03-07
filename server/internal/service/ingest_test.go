@@ -557,3 +557,99 @@ func TestTruncateRunes(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcileFallbackWritesNothing verifies that when the LLM fails during
+// reconciliation (with existing memories present), the system writes nothing
+// instead of blindly adding all facts as duplicates.
+func TestReconcileFallbackWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	// Mock LLM: first call (extractFacts) succeeds, second call (reconcile) fails with 500.
+	callCount := 0
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// extractFacts response.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]string{"content": `{"facts": ["user prefers dark mode"]}`}},
+				},
+			})
+			return
+		}
+		// All subsequent calls fail (reconcile + retry).
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "service unavailable"}`))
+	}))
+	defer mockLLM.Close()
+
+	llmClient := llm.New(llm.Config{
+		APIKey:  "test-key",
+		BaseURL: mockLLM.URL,
+		Model:   "test-model",
+	})
+
+	// Repo has existing memories so reconcile path is taken (not addAllFacts bypass).
+	memRepo := &memoryRepoMock{
+		vectorResults: []domain.Memory{
+			{ID: "mem-existing", Content: "user prefers light mode", MemoryType: domain.TypeInsight, State: domain.StateActive},
+		},
+	}
+
+	svc := NewIngestService(memRepo, llmClient, nil, "auto-model", ModeSmart, false)
+
+	res, err := svc.Ingest(context.Background(), "agent-1", IngestRequest{
+		Mode:      ModeSmart,
+		SessionID: "sess-fallback",
+		AgentID:   "agent-1",
+		Messages: []IngestMessage{
+			{Role: "user", Content: "I prefer dark mode"},
+			{Role: "assistant", Content: "Noted."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// With the safer fallback, nothing should be written on LLM failure.
+	if res.MemoriesChanged != 0 {
+		t.Fatalf("expected 0 memories changed (safe fallback), got %d", res.MemoriesChanged)
+	}
+	// No Create calls should have been made.
+	if len(memRepo.createCalls) != 0 {
+		t.Fatalf("expected 0 Create calls (safe fallback), got %d", len(memRepo.createCalls))
+	}
+}
+
+// TestGatherExistingMemoriesFiltersLowScoreVectorResults verifies that vector
+// search results with scores below the minimum threshold are excluded from the
+// gathered memories, preventing low-relevance candidates from wasting LLM context.
+func TestGatherExistingMemoriesFiltersLowScoreVectorResults(t *testing.T) {
+	t.Parallel()
+
+	highScore := 0.8
+	lowScore := 0.1
+
+	memRepo := &memoryRepoMock{
+		vectorResults: []domain.Memory{
+			{ID: "high-relevance", Content: "relevant memory", MemoryType: domain.TypeInsight, State: domain.StateActive, Score: &highScore},
+			{ID: "low-relevance", Content: "unrelated memory", MemoryType: domain.TypeInsight, State: domain.StateActive, Score: &lowScore},
+		},
+	}
+
+	svc := NewIngestService(memRepo, nil, nil, "auto-model", ModeSmart, false)
+
+	result := svc.gatherExistingMemories(context.Background(), "agent-1", []string{"test fact"})
+
+	// Only the high-score result should be included.
+	if len(result) != 1 {
+		t.Fatalf("expected 1 memory (filtered by threshold), got %d", len(result))
+	}
+	if result[0].ID != "high-relevance" {
+		t.Fatalf("expected high-relevance memory, got %s", result[0].ID)
+	}
+}
