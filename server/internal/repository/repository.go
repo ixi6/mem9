@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
 )
@@ -62,5 +63,5 @@ type UploadTaskRepo interface {
 	UpdateProgress(ctx context.Context, taskID string, doneChunks int) error
 	UpdateTotalChunks(ctx context.Context, taskID string, totalChunks int) error
 	FetchPending(ctx context.Context, limit int) ([]domain.UploadTask, error)
-	ResetProcessing(ctx context.Context) (int64, error)
+	ResetProcessing(ctx context.Context, staleTimeout time.Duration) (int64, error)
 }

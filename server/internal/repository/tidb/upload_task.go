@@ -4,10 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
 )
-
 type UploadTaskRepoImpl struct {
 	db *sql.DB
 }
@@ -143,9 +143,14 @@ func (r *UploadTaskRepoImpl) FetchPending(ctx context.Context, limit int) ([]dom
 	return tasks, nil
 }
 
-func (r *UploadTaskRepoImpl) ResetProcessing(ctx context.Context) (int64, error) {
+// ResetProcessing resets tasks stuck in 'processing' longer than the given
+// timeout back to 'pending'. This is safe for multi-instance deployments
+// because it only touches abandoned tasks, not tasks being actively processed
+// by other instances.
+func (r *UploadTaskRepoImpl) ResetProcessing(ctx context.Context, staleTimeout time.Duration) (int64, error) {
 	result, err := r.db.ExecContext(ctx,
-		`UPDATE upload_tasks SET status = 'pending', updated_at = NOW() WHERE status = 'processing'`,
+		`UPDATE upload_tasks SET status = 'pending', updated_at = NOW() WHERE status = 'processing' AND updated_at < ?`,
+		time.Now().Add(-staleTimeout),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("reset upload task processing: %w", err)

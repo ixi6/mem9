@@ -105,7 +105,7 @@ func (w *UploadWorker) Run(ctx context.Context) error {
 	logger.Info("upload worker started")
 	defer logger.Info("upload worker stopped")
 
-	resetCount, err := w.tasks.ResetProcessing(ctx)
+	resetCount, err := w.tasks.ResetProcessing(ctx, defaultTaskTimeout)
 	if err != nil {
 		return fmt.Errorf("reset processing tasks: %w", err)
 	}
@@ -172,6 +172,14 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 
 	data, err := os.ReadFile(task.FilePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// File not on this instance — requeue so the instance that has the file can pick it up.
+			logger.Info("upload file not found locally, requeueing task", "task_id", task.TaskID, "path", task.FilePath)
+			if reqErr := w.tasks.UpdateStatus(ctx, task.TaskID, domain.TaskPending, ""); reqErr != nil {
+				logger.Error("failed to requeue task", "task_id", task.TaskID, "err", reqErr)
+			}
+			return nil
+		}
 		return w.failTask(ctx, task, fmt.Errorf("read upload file: %w", err), logger)
 	}
 
