@@ -14,7 +14,7 @@ description: |
   - "import memories"
   - "upload sessions"
 
-author: qiffang
+
 keywords:
   - mem9
   - memory plugin
