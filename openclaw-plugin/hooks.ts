@@ -35,6 +35,7 @@ const MAX_INGEST_MESSAGES = 20; // absolute cap even if small messages
 /** Minimal logger — matches OpenClaw's PluginLogger shape. */
 interface Logger {
   info: (msg: string) => void;
+  warn?: (msg: string) => void;
   error: (msg: string) => void;
 }
 
@@ -186,6 +187,30 @@ function stripInjectedContext(content: string): string {
   return s.trim();
 }
 
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  let text = "";
+  for (const block of content) {
+    if (
+      block &&
+      typeof block === "object" &&
+      (block as Record<string, unknown>).type === "text" &&
+      typeof (block as Record<string, unknown>).text === "string"
+    ) {
+      text += (block as Record<string, unknown>).text as string;
+    }
+  }
+
+  return text;
+}
+
 function cleanMessageContent(content: unknown): { changed: boolean; content: unknown } {
   if (typeof content === "string") {
     const cleaned = stripInjectedContext(content);
@@ -254,9 +279,15 @@ export function registerHooks(
   api: HookApi,
   backend: MemoryBackend,
   logger: Logger,
-  options?: { maxIngestBytes?: number; enableToolResultPersist?: boolean },
+  options?: {
+    maxIngestBytes?: number;
+    enableToolResultPersist?: boolean;
+    supportsPrependSystemContext?: boolean;
+    fallbackSessionId?: string;
+  },
 ): void {
   const maxIngestBytes = options?.maxIngestBytes ?? DEFAULT_MAX_INGEST_BYTES;
+  const supportsPrependSystemContext = options?.supportsPrependSystemContext === true;
 
   // --------------------------------------------------------------------------
   // before_prompt_build — inject relevant memories into every LLM call
@@ -277,6 +308,12 @@ export function registerHooks(
         const { pinned, dynamic } = splitMemories(memories);
 
         logger.info(`[mem9] Injecting ${memories.length} memories into prompt context`);
+
+        if (!supportsPrependSystemContext) {
+          return {
+            prependContext: formatMemoriesBlock(memories),
+          };
+        }
 
         return {
           prependSystemContext: pinned.length ? formatMemoriesBlock(pinned) : undefined,
@@ -301,6 +338,7 @@ export function registerHooks(
     api.on("tool_result_persist", (event: unknown) => {
       const evt = event as { message?: unknown };
       const cleaned = cleanAgentMessage(evt?.message);
+      // undefined = no mutation; OpenClaw persists the original message unchanged.
       if (!cleaned) return;
       return { message: cleaned };
     });
@@ -321,8 +359,9 @@ export function registerHooks(
         if (!msg || typeof msg !== "object") continue;
         const m = msg as Record<string, unknown>;
         if (m.role !== "user") continue;
-        if (typeof m.content === "string" && m.content.length > 10) {
-          userTexts.push(m.content);
+        const content = extractTextContent(m.content);
+        if (content.length > 10) {
+          userTexts.push(content);
         }
       }
 
@@ -371,22 +410,7 @@ export function registerHooks(
         const role = typeof m.role === "string" ? m.role : "";
         if (!role) continue;
 
-        let content = "";
-        if (typeof m.content === "string") {
-          content = m.content;
-        } else if (Array.isArray(m.content)) {
-          // Handle array content blocks (e.g., Claude's content blocks)
-          for (const block of m.content) {
-            if (
-              block &&
-              typeof block === "object" &&
-              (block as Record<string, unknown>).type === "text" &&
-              typeof (block as Record<string, unknown>).text === "string"
-            ) {
-              content += (block as Record<string, unknown>).text as string;
-            }
-          }
-        }
+        const content = extractTextContent(m.content);
 
         if (!content) continue;
 
@@ -406,6 +430,10 @@ export function registerHooks(
 
       const sessionId = typeof hookCtx.sessionId === "string"
         ? hookCtx.sessionId
+        : typeof hookCtx.sessionKey === "string"
+        ? hookCtx.sessionKey
+        : typeof options?.fallbackSessionId === "string"
+        ? options.fallbackSessionId
         : `ses_${Date.now()}`;
 
       const agentId = typeof hookCtx.agentId === "string"
@@ -419,8 +447,6 @@ export function registerHooks(
         agent_id: agentId,
         mode: "smart",
       });
-
-
       if (result.status === "accepted") {
         logger.info("[mem9] Ingest accepted for async processing");
       } else if ((result.memories_changed ?? 0) > 0) {

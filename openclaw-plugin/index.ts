@@ -25,6 +25,7 @@ interface OpenClawPluginApi {
   pluginConfig?: unknown;
   logger: {
     info: (...args: unknown[]) => void;
+    warn?: (...args: unknown[]) => void;
     error: (...args: unknown[]) => void;
   };
   registerContextEngine?: unknown;
@@ -240,6 +241,17 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
   ];
 }
 
+function warnOrInfo(
+  logger: { info: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void },
+  message: string,
+) {
+  if (typeof logger.warn === "function") {
+    logger.warn(message);
+    return;
+  }
+  logger.info(message);
+}
+
 const mnemoPlugin = {
   id: "mem9",
   name: "Mnemo Memory",
@@ -249,6 +261,8 @@ const mnemoPlugin = {
   async register(api: OpenClawPluginApi) {
     const cfg = (api.pluginConfig ?? {}) as PluginConfig;
     const effectiveApiUrl = cfg.apiUrl ?? DEFAULT_API_URL;
+    const fallbackSessionId = `ses_${Date.now().toString(36)}`;
+    // beta.1 introduced registerContextEngine and the new hook payloads we rely on here.
     const supportsBeta1Hooks = typeof api.registerContextEngine === "function";
     const allowPromptInjection =
       api.config?.plugins?.entries?.[mnemoPlugin.id]?.hooks?.allowPromptInjection === true;
@@ -256,7 +270,8 @@ const mnemoPlugin = {
       api.logger.info(`[mem9] apiUrl not configured, using default ${DEFAULT_API_URL}`);
     }
     if (supportsBeta1Hooks && !allowPromptInjection) {
-      api.logger.info(
+      warnOrInfo(
+        api.logger,
         "[mem9] Hook mode active. On OpenClaw beta.1+, hook-based memory injection requires " +
           "plugins.entries.mem9.hooks.allowPromptInjection = true."
       );
@@ -305,6 +320,8 @@ const mnemoPlugin = {
     registerHooks(api, hookBackend, api.logger, {
       maxIngestBytes: cfg.maxIngestBytes,
       enableToolResultPersist: supportsBeta1Hooks,
+      supportsPrependSystemContext: supportsBeta1Hooks,
+      fallbackSessionId,
     });
   },
 };
