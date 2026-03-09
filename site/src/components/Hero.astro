@@ -28,17 +28,59 @@ const { hero, aria } = Astro.props;
         {hero.subtitle}
       </p>
 
-      <div class="cta-grid">
+      <div class="cta-grid" data-onboarding-shell data-onboarding-version="stable">
+        <div class="cta-head">
+          <div
+            class="cta-version-tabs"
+            role="tablist"
+            aria-label={hero.onboardingLabel}
+            data-i18n-attr="aria-label:hero.onboardingLabel"
+          >
+            <button
+              type="button"
+              class="cta-version-tab is-active"
+              role="tab"
+              aria-selected="true"
+              data-onboarding-version-tab="stable"
+              data-i18n="hero.onboardingStableLabel"
+            >
+              {hero.onboardingStableLabel}
+            </button>
+            <button
+              type="button"
+              class="cta-version-tab"
+              role="tab"
+              aria-selected="false"
+              data-onboarding-version-tab="beta"
+              data-i18n="hero.onboardingBetaLabel"
+            >
+              {hero.onboardingBetaLabel}
+            </button>
+          </div>
+          <p
+            class="cta-version-badge"
+            data-onboarding-beta-support
+            data-i18n="hero.onboardingBetaSupportLabel"
+            hidden
+          >
+            {hero.onboardingBetaSupportLabel}
+          </p>
+        </div>
         <div class="cta-card surface-card">
           <p class="cta-label" data-i18n="hero.onboardingLabel">{hero.onboardingLabel}</p>
           <div class="cta-command">
-            <code data-i18n="hero.onboardingCommand">{hero.onboardingCommand}</code>
+            <code
+              data-onboarding-command
+              data-command-stable={hero.onboardingCommandStable}
+              data-command-beta={hero.onboardingCommandBeta}
+            >
+              {hero.onboardingCommandStable}
+            </code>
             <button
               type="button"
               class="copy-button"
               data-copy-button
-              data-copy-key="hero.onboardingCommand"
-              data-copy-text={hero.onboardingCommand}
+              data-copy-text={hero.onboardingCommandStable}
               aria-label={aria.copyOnboarding}
               title={aria.copyOnboarding}
               data-i18n-attr="aria-label:aria.copyOnboarding;title:aria.copyOnboarding"
@@ -75,6 +117,19 @@ const { hero, aria } = Astro.props;
           </div>
           <p class="sr-only" data-copy-feedback aria-live="polite"></p>
         </div>
+      </div>
+
+      <div class="beta-highlights" data-beta-highlights hidden>
+        {hero.betaHighlights.map((highlight, index) => (
+          <article class="highlight-card beta-highlight-card surface-card">
+            <h2 class="highlight-title" data-i18n={`hero.betaHighlights.${index}.title`}>
+              {highlight.title}
+            </h2>
+            <p class="highlight-description" data-i18n={`hero.betaHighlights.${index}.description`}>
+              {highlight.description}
+            </p>
+          </article>
+        ))}
       </div>
 
       <div class="hero-highlights">
@@ -156,13 +211,105 @@ const { hero, aria } = Astro.props;
 
   .cta-grid {
     width: min(100%, var(--content-rail));
+    margin-bottom: 0.55rem;
+  }
+
+  .cta-grid[data-onboarding-version='beta'] {
     margin-bottom: 0.85rem;
+  }
+
+  .cta-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.85rem;
+  }
+
+  .cta-version-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--button-bg);
+  }
+
+  .cta-version-tab {
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 0.38rem 0.8rem;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  .cta-version-tab:hover {
+    color: var(--text);
+  }
+
+  .cta-version-tab.is-active {
+    background: var(--button-active-bg);
+    color: var(--text);
+  }
+
+  .cta-version-badge {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    text-align: right;
   }
 
   .cta-card {
     padding: 1rem 1rem 1.05rem;
     min-height: 132px;
     background: linear-gradient(180deg, var(--surface-elevated-start), var(--surface-elevated-end));
+  }
+
+  .beta-highlights,
+  .hero-highlights {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.85rem;
+    width: min(100%, var(--content-rail));
+  }
+
+  .beta-highlights {
+    margin-bottom: 0.85rem;
+    align-items: stretch;
+  }
+
+  .beta-highlights[hidden] {
+    display: none !important;
+    margin: 0 !important;
+  }
+
+  .beta-highlight-card {
+    grid-column: auto;
+    min-height: 158px;
+    min-width: 0;
+    opacity: 0;
+    transform: translate3d(0, 18px, 0);
+  }
+
+  .beta-highlights.is-visible .beta-highlight-card {
+    animation: beta-highlight-slide 0.46s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .beta-highlights.is-visible .beta-highlight-card:nth-child(2) {
+    animation-delay: 0.07s;
+  }
+
+  .beta-highlights.is-visible .beta-highlight-card:nth-child(3) {
+    animation-delay: 0.14s;
   }
 
   .cta-label {
@@ -233,13 +380,6 @@ const { hero, aria } = Astro.props;
     display: block;
   }
 
-  .hero-highlights {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.85rem;
-    width: min(100%, var(--content-rail));
-  }
-
   .highlight-card {
     min-height: 140px;
     padding: 1rem 1rem 1.05rem;
@@ -251,6 +391,18 @@ const { hero, aria } = Astro.props;
     letter-spacing: -0.03em;
     margin-bottom: 0.6rem;
     color: var(--text);
+  }
+
+  @keyframes beta-highlight-slide {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 20px, 0);
+    }
+
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
   }
 
   .highlight-description {
@@ -357,6 +509,16 @@ const { hero, aria } = Astro.props;
       flex-direction: column;
     }
 
+    .cta-head {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .cta-version-badge {
+      text-align: left;
+    }
+
+    .beta-highlights,
     .hero-highlights {
       grid-template-columns: 1fr;
     }
