@@ -201,29 +201,10 @@ export function createMem9ContextEngine(backend: MemoryBackend, logger: Logger):
     },
 
     async assemble(params): Promise<AssembleResult> {
-      const query = inferQuery(params.messages);
-      if (!query) {
-        return {
-          messages: params.messages,
-          estimatedTokens: Math.max(1, params.messages.length * 80),
-        };
-      }
-
-      try {
-        const result = await backend.search({ q: query, limit: MAX_INJECT });
-        const memories = result.data ?? [];
-        return {
-          messages: params.messages,
-          estimatedTokens: Math.max(1, params.messages.length * 80),
-          systemPromptAddition: memories.length > 0 ? formatMemoriesBlock(memories) : undefined,
-        };
-      } catch (err) {
-        logger.error(`[mem9] context-engine assemble failed: ${String(err)}`);
-        return {
-          messages: params.messages,
-          estimatedTokens: Math.max(1, params.messages.length * 80),
-        };
-      }
+      return {
+        messages: params.messages,
+        estimatedTokens: Math.max(1, params.messages.length * 80),
+      };
     },
 
     async compact(params): Promise<CompactResult> {

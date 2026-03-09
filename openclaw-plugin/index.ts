@@ -331,12 +331,12 @@ const mnemoPlugin = {
       maxIngestBytes: cfg.maxIngestBytes,
       enableToolResultPersist: supportsBeta1Hooks,
       supportsPrependSystemContext: supportsBeta1Hooks,
-      enableBeforePromptBuild: !contextEngineActive,
+      enableBeforePromptBuild: true,
       enableAgentEndIngest: !contextEngineActive,
     });
 
     if (contextEngineActive) {
-      api.logger.info("[mem9] contextEngine slot points to mem9; hook recall/ingest is disabled to avoid duplicate writes");
+      api.logger.info("[mem9] contextEngine slot points to mem9; hook recall enabled and hook agent_end ingest disabled");
     }
   },
 };
