@@ -185,8 +185,6 @@ export function createMem9ContextEngine(backend: MemoryBackend, logger: Logger):
       return { ingested: true };
     },
 
-    async afterTurn(_params): Promise<void> {},
-
     async assemble(params): Promise<AssembleResult> {
       const query = inferQuery(params.messages);
       if (!query) {
