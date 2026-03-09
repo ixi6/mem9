@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { MemoryBackend } from "./backend.js";
@@ -164,18 +165,60 @@ async function tryLegacyCompact(params: {
 }): Promise<CompactResult | null> {
   try {
     const pluginSdkEntry = require.resolve("openclaw/plugin-sdk");
-    const legacyPath = path.resolve(path.dirname(pluginSdkEntry), "../context-engine/legacy.js");
-    const mod = (await import(pathToFileURL(legacyPath).href)) as {
-      LegacyContextEngine?: new () => {
-        compact: (arg: typeof params) => Promise<CompactResult>;
+    const pluginSdkDir = path.dirname(pluginSdkEntry);
+    const runtimeCandidates = fs.readdirSync(pluginSdkDir)
+      .filter((name) => /^compact\.runtime-.*\.js$/.test(name))
+      .sort();
+
+    for (const runtimeName of runtimeCandidates) {
+      const runtimePath = path.join(pluginSdkDir, runtimeName);
+      const mod = (await import(pathToFileURL(runtimePath).href)) as {
+        compactEmbeddedPiSessionDirect?: (arg: {
+          sessionId: string;
+          sessionFile: string;
+          tokenBudget?: number;
+          force?: boolean;
+          customInstructions?: string;
+          workspaceDir: string;
+        }) => Promise<{
+          ok: boolean;
+          compacted: boolean;
+          reason?: string;
+          result?: {
+            summary?: string;
+            firstKeptEntryId?: string;
+            tokensBefore: number;
+            tokensAfter?: number;
+            details?: unknown;
+          };
+        }>;
       };
-    };
-    if (!mod?.LegacyContextEngine) {
-      return null;
+      if (typeof mod.compactEmbeddedPiSessionDirect !== "function") continue;
+
+      const result = await mod.compactEmbeddedPiSessionDirect({
+        sessionId: params.sessionId,
+        sessionFile: params.sessionFile,
+        tokenBudget: params.tokenBudget,
+        force: params.force,
+        customInstructions: params.customInstructions,
+        workspaceDir: process.cwd(),
+      });
+
+      return {
+        ok: result.ok,
+        compacted: result.compacted,
+        reason: result.reason,
+        result: result.result ? {
+          summary: result.result.summary,
+          firstKeptEntryId: result.result.firstKeptEntryId,
+          tokensBefore: result.result.tokensBefore,
+          tokensAfter: result.result.tokensAfter,
+          details: result.result.details,
+        } : undefined,
+      };
     }
 
-    const legacy = new mod.LegacyContextEngine();
-    return legacy.compact(params);
+    return null;
   } catch {
     return null;
   }
