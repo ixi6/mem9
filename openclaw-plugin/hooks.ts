@@ -46,6 +46,12 @@ interface HookApi {
   on: (hookName: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }) => void;
 }
 
+type HookAgentContext = {
+  agentId?: string;
+  sessionId?: string;
+  sessionKey?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Message selection (size-aware)
 // ---------------------------------------------------------------------------
@@ -146,6 +152,21 @@ function formatMemoriesBlock(memories: Memory[]): string {
   ].join("\n");
 }
 
+function splitMemories(memories: Memory[]): { pinned: Memory[]; dynamic: Memory[] } {
+  const pinned: Memory[] = [];
+  const dynamic: Memory[] = [];
+
+  for (const memory of memories) {
+    if ((memory.memory_type ?? "pinned") === "pinned") {
+      pinned.push(memory);
+    } else {
+      dynamic.push(memory);
+    }
+  }
+
+  return { pinned, dynamic };
+}
+
 // ---------------------------------------------------------------------------
 // Context stripping (prevent re-ingesting injected memories)
 // ---------------------------------------------------------------------------
@@ -165,6 +186,66 @@ function stripInjectedContext(content: string): string {
   return s.trim();
 }
 
+function cleanMessageContent(content: unknown): { changed: boolean; content: unknown } {
+  if (typeof content === "string") {
+    const cleaned = stripInjectedContext(content);
+    return {
+      changed: cleaned !== content,
+      content: cleaned,
+    };
+  }
+
+  if (!Array.isArray(content)) {
+    return { changed: false, content };
+  }
+
+  let changed = false;
+  const cleanedBlocks = content.map((block) => {
+    if (
+      !block ||
+      typeof block !== "object" ||
+      (block as Record<string, unknown>).type !== "text" ||
+      typeof (block as Record<string, unknown>).text !== "string"
+    ) {
+      return block;
+    }
+
+    const text = (block as Record<string, unknown>).text as string;
+    const cleaned = stripInjectedContext(text);
+    if (cleaned === text) {
+      return block;
+    }
+
+    changed = true;
+    return {
+      ...(block as Record<string, unknown>),
+      text: cleaned,
+    };
+  });
+
+  return {
+    changed,
+    content: changed ? cleanedBlocks : content,
+  };
+}
+
+function cleanAgentMessage(message: unknown): Record<string, unknown> | null {
+  if (!message || typeof message !== "object") {
+    return null;
+  }
+
+  const msg = message as Record<string, unknown>;
+  const cleaned = cleanMessageContent(msg.content);
+  if (!cleaned.changed) {
+    return null;
+  }
+
+  return {
+    ...msg,
+    content: cleaned.content,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Hook registration
 // ---------------------------------------------------------------------------
@@ -173,7 +254,7 @@ export function registerHooks(
   api: HookApi,
   backend: MemoryBackend,
   logger: Logger,
-  options?: { maxIngestBytes?: number },
+  options?: { maxIngestBytes?: number; enableToolResultPersist?: boolean },
 ): void {
   const maxIngestBytes = options?.maxIngestBytes ?? DEFAULT_MAX_INGEST_BYTES;
 
@@ -193,14 +274,17 @@ export function registerHooks(
 
         if (memories.length === 0) return;
 
-        logger.info(`[mnemo] Injecting ${memories.length} memories into prompt context`);
+        const { pinned, dynamic } = splitMemories(memories);
+
+        logger.info(`[mem9] Injecting ${memories.length} memories into prompt context`);
 
         return {
-          prependContext: formatMemoriesBlock(memories),
+          prependSystemContext: pinned.length ? formatMemoriesBlock(pinned) : undefined,
+          prependContext: dynamic.length ? formatMemoriesBlock(dynamic) : undefined,
         };
       } catch (err) {
         // Graceful degradation — never block the LLM call
-        logger.error(`[mnemo] before_prompt_build failed: ${String(err)}`);
+        logger.error(`[mem9] before_prompt_build failed: ${String(err)}`);
       }
     },
     { priority: 50 }, // Run after most plugins but before agent start
@@ -210,8 +294,17 @@ export function registerHooks(
   // after_compaction — no-op placeholder (no client-side cache to invalidate)
   // --------------------------------------------------------------------------
   api.on("after_compaction", async (_event: unknown) => {
-    logger.info("[mnemo] Compaction detected — memories will be re-queried on next prompt");
+    logger.info("[mem9] Compaction detected — memories will be re-queried on next prompt");
   });
+
+  if (options?.enableToolResultPersist) {
+    api.on("tool_result_persist", (event: unknown) => {
+      const evt = event as { message?: unknown };
+      const cleaned = cleanAgentMessage(evt?.message);
+      if (!cleaned) return;
+      return { message: cleaned };
+    });
+  }
 
   // --------------------------------------------------------------------------
   // before_reset — save session context before /reset wipes it
@@ -247,10 +340,10 @@ export function registerHooks(
         tags: ["auto-capture", "session-summary", "pre-reset"],
       });
 
-      logger.info("[mnemo] Session context saved before reset");
+      logger.info("[mem9] Session context saved before reset");
     } catch (err) {
       // Best-effort — never block /reset
-      logger.error(`[mnemo] before_reset save failed: ${String(err)}`);
+      logger.error(`[mem9] before_reset save failed: ${String(err)}`);
     }
   });
 
@@ -261,14 +354,13 @@ export function registerHooks(
   // accumulating until byte budget is hit. Then POST to tenant-scoped ingest endpoint.
   // for server-side LLM extraction + reconciliation.
   // --------------------------------------------------------------------------
-  api.on("agent_end", async (event: unknown) => {
+  api.on("agent_end", async (event: unknown, ctx: unknown) => {
     try {
       const evt = event as {
         success?: boolean;
         messages?: unknown[];
-        sessionId?: string;
-        agentId?: string;
       };
+      const hookCtx = (ctx ?? {}) as HookAgentContext;
       if (!evt?.success || !evt.messages || evt.messages.length === 0) return;
 
       // Format raw messages into IngestMessage format
@@ -312,12 +404,12 @@ export function registerHooks(
 
       if (selected.length === 0) return;
 
-      const sessionId = typeof evt.sessionId === "string"
-        ? evt.sessionId
+      const sessionId = typeof hookCtx.sessionId === "string"
+        ? hookCtx.sessionId
         : `ses_${Date.now()}`;
 
-      const agentId = typeof evt.agentId === "string"
-        ? evt.agentId
+      const agentId = typeof hookCtx.agentId === "string"
+        ? hookCtx.agentId
         : AUTO_CAPTURE_SOURCE;
 
       // POST messages to unified memories endpoint — server handles LLM extraction + reconciliation
@@ -330,10 +422,10 @@ export function registerHooks(
 
 
       if (result.status === "accepted") {
-        logger.info("[mnemo] Ingest accepted for async processing");
+        logger.info("[mem9] Ingest accepted for async processing");
       } else if ((result.memories_changed ?? 0) > 0) {
         logger.info(
-          `[mnemo] Ingested session: memories_changed=${result.memories_changed}, status=${result.status}`
+          `[mem9] Ingested session: memories_changed=${result.memories_changed}, status=${result.status}`
         );
       }
     } catch {

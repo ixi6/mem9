@@ -17,11 +17,17 @@ function jsonResult(data: unknown) {
 }
 
 interface OpenClawPluginApi {
+  config?: {
+    plugins?: {
+      entries?: Record<string, { hooks?: { allowPromptInjection?: boolean } }>;
+    };
+  };
   pluginConfig?: unknown;
   logger: {
     info: (...args: unknown[]) => void;
     error: (...args: unknown[]) => void;
   };
+  registerContextEngine?: unknown;
   registerTool: (
     factory: ToolFactory | (() => AnyAgentTool[]),
     opts: { names: string[] }
@@ -108,6 +114,18 @@ function buildTools(backend: MemoryBackend): AnyAgentTool[] {
             description: "Comma-separated tags to filter by (AND)",
           },
           source: { type: "string", description: "Filter by source agent" },
+          memory_type: {
+            type: "string",
+            description: "Filter by memory type (for example pinned or insight)",
+          },
+          agent_id: {
+            type: "string",
+            description: "Filter by the agent that owns the memory",
+          },
+          session_id: {
+            type: "string",
+            description: "Filter by the session that produced the memory",
+          },
           limit: {
             type: "number",
             description: "Max results (default 20, max 200)",
@@ -231,8 +249,17 @@ const mnemoPlugin = {
   async register(api: OpenClawPluginApi) {
     const cfg = (api.pluginConfig ?? {}) as PluginConfig;
     const effectiveApiUrl = cfg.apiUrl ?? DEFAULT_API_URL;
+    const supportsBeta1Hooks = typeof api.registerContextEngine === "function";
+    const allowPromptInjection =
+      api.config?.plugins?.entries?.[mnemoPlugin.id]?.hooks?.allowPromptInjection === true;
     if (!cfg.apiUrl) {
-      api.logger.info(`[mnemo] apiUrl not configured, using default ${DEFAULT_API_URL}`);
+      api.logger.info(`[mem9] apiUrl not configured, using default ${DEFAULT_API_URL}`);
+    }
+    if (supportsBeta1Hooks && !allowPromptInjection) {
+      api.logger.info(
+        "[mem9] Hook mode active. On OpenClaw beta.1+, hook-based memory injection requires " +
+          "plugins.entries.mem9.hooks.allowPromptInjection = true."
+      );
     }
 
 
@@ -241,7 +268,7 @@ const mnemoPlugin = {
       const backend = new ServerBackend(effectiveApiUrl, "", agentName);
       const result = await backend.register();
       api.logger.info(
-        `[mnemo] *** Auto-provisioned tenant_id=${result.id} *** Save this tenant ID to your config as tenantID`
+        `[mem9] *** Auto-provisioned tenant_id=${result.id} *** Save this tenant ID to your config as tenantID`
       );
       return result.id;
     };
@@ -254,7 +281,7 @@ const mnemoPlugin = {
       return registrationPromise;
     };
 
-    api.logger.info("[mnemo] Server mode (tenant-scoped mem9 API)");
+    api.logger.info("[mem9] Server mode (tenant-scoped mem9 API)");
 
     const factory: ToolFactory = (ctx: ToolContext) => {
       const agentId = ctx.agentId ?? cfg.agentName ?? "agent";
@@ -275,7 +302,10 @@ const mnemoPlugin = {
       () => resolveTenantID(cfg.agentName ?? "agent"),
       cfg.agentName ?? "agent",
     );
-    registerHooks(api, hookBackend, api.logger, { maxIngestBytes: cfg.maxIngestBytes });
+    registerHooks(api, hookBackend, api.logger, {
+      maxIngestBytes: cfg.maxIngestBytes,
+      enableToolResultPersist: supportsBeta1Hooks,
+    });
   },
 };
 
