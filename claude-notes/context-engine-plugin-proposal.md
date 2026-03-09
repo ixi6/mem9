@@ -9,9 +9,9 @@ date: 2026-03-09
 OpenClaw v2026.3.7-beta.1 introduces a first-class `ContextEngine` plugin slot (PR #22201)
 that grants plugins ownership of the full context lifecycle: bootstrap, assemble, ingest,
 compact, subagent handoff. The current mnemos openclaw-plugin occupies the `memory` slot and
-patches two hook points (`before_prompt_build`, `agent_end`). This proposal describes a
-two-phase migration from that model to full `ContextEngine` ownership, with a
-backward-compatible hook fallback for pre-beta.1 users.
+registers four lifecycle hooks (`before_prompt_build`, `after_compaction`, `before_reset`,
+`agent_end`). This proposal describes a two-phase migration from that model to full
+`ContextEngine` ownership, with a backward-compatible hook fallback for pre-beta.1 users.
 
 ---
 
@@ -19,13 +19,13 @@ backward-compatible hook fallback for pre-beta.1 users.
 
 The current hook model has five concrete gaps:
 
-| Gap | Impact |
-|---|---|
-| No pre-compaction flush | Memories lost when the context window is squashed |
-| `after_compaction` is a no-op | Plugin cannot react to compaction events |
-| Pinned memories cost tokens every turn | `prependContext` is not provider-cached |
-| `allowPromptInjection` undocumented | beta.1 silently strips memory injection without this flag |
-| No subagent memory handoff | Child agents start with an empty memory context |
+| Gap | Current hook | Impact |
+|---|---|---|
+| No pre-compaction flush | `after_compaction` is a log-only no-op | Memories lost when the context window is squashed |
+| `after_compaction` is a no-op | fires after the window is gone | Plugin cannot react in time to save anything |
+| Pinned memories cost tokens every turn | `before_prompt_build` injects all memories together | `prependContext` is not provider-cached |
+| `allowPromptInjection` undocumented | `before_prompt_build` return value | beta.1 silently strips memory injection without this flag |
+| No subagent memory handoff | `agent_end` only captures the current agent | Child agents start with an empty memory context |
 
 ---
 
@@ -82,12 +82,85 @@ api.on("session:compact:before", async (event: unknown) => {
 });
 ```
 
+**Fallback policy when mem9 is unavailable during compaction (Phase 1 hook path):**
+
+The hook path must not block compaction under any circumstances. The failure policy is:
+
+1. **Timeout + bounded retry**: Wrap the `backend.ingest()` call with a 5-second timeout.
+   If the call times out or throws, enqueue the serialized messages into a module-level
+   durable queue (`compactQueue: Array<{messages, sessionId, ts}>`).
+2. **Retry worker**: A `setInterval` worker (30-second cadence) drains `compactQueue` by
+   replaying failed ingest calls. Queue is bounded to 10 entries (oldest-evicted) to cap
+   memory growth. Each entry retries at most 3 times before being dropped with a warning log.
+3. **Watchdog alerting**: If the queue depth exceeds 5 entries, emit a single `logger.error`
+   per compaction cycle so operators know ingest is degraded.
+4. **Explicit fail-safe**: After exhausting retries, the message batch is dropped and
+   `logger.error("[mnemo] compact flush exhausted retries — batch dropped")` fires. This is
+   the explicit data-loss boundary; it is logged, bounded, and operator-visible.
+
+```ts
+// hooks.ts — compact flush with retry queue
+const compactQueue: Array<{ messages: unknown[]; sessionId: string; ts: number; attempts: number }> = [];
+const COMPACT_QUEUE_LIMIT = 10;
+const COMPACT_MAX_RETRIES = 3;
+const COMPACT_TIMEOUT_MS = 5_000;
+
+async function flushWithTimeout(backend: MemoryBackend, payload: IngestInput): Promise<void> {
+  await Promise.race([
+    backend.ingest(payload),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), COMPACT_TIMEOUT_MS)),
+  ]);
+}
+
+api.on("session:compact:before", async (event: unknown) => {
+  const evt = event as { messages?: unknown[]; sessionId?: string };
+  const sessionId = evt.sessionId ?? `ses_${Date.now()}`;
+  const selected = selectAndFormat(evt.messages, maxIngestBytes); // existing helper
+  if (!selected.length) return;
+
+  try {
+    await flushWithTimeout(backend, { messages: selected, session_id: sessionId, agent_id: agentId, mode: "smart" });
+    logger.info("[mnemo] Pre-compaction flush complete");
+  } catch (err) {
+    logger.error(`[mnemo] compact flush failed (${String(err)}) — queuing for retry`);
+    if (compactQueue.length >= COMPACT_QUEUE_LIMIT) compactQueue.shift(); // evict oldest
+    compactQueue.push({ messages: selected, sessionId, ts: Date.now(), attempts: 0 });
+  }
+});
+
+// Retry worker — drains compactQueue in background
+setInterval(async () => {
+  if (compactQueue.length > 5) logger.error(`[mnemo] compact queue depth=${compactQueue.length} — ingest may be degraded`);
+  for (let i = compactQueue.length - 1; i >= 0; i--) {
+    const entry = compactQueue[i];
+    entry.attempts++;
+    try {
+      await flushWithTimeout(backend, { messages: entry.messages as IngestMessage[], session_id: entry.sessionId, agent_id: agentId, mode: "smart" });
+      compactQueue.splice(i, 1);
+    } catch {
+      if (entry.attempts >= COMPACT_MAX_RETRIES) {
+        logger.error(`[mnemo] compact flush exhausted retries — batch dropped (sessionId=${entry.sessionId})`);
+        compactQueue.splice(i, 1);
+      }
+    }
+  }
+}, 30_000);
+```
+
 > **Pre-beta.1 limitation**: `session:compact:before` does not exist on old OpenClaw. For
 > pre-beta.1 users, compaction remains a memory-loss event — the window is squashed before
 > any hook fires, leaving nothing to flush. The only partial mitigation is the existing
 > `before_reset` hook, which saves the last 3 user messages on explicit `/reset`. Automatic
 > compaction is not covered. This is a known limitation with no clean fix on the old API
 > surface.
+
+**Design note — alternatives considered for compaction flushing:**
+
+| Option | Pros | Cons | Decision |
+|---|---|---|---|
+| **In-process retry queue (chosen)** | No external deps; bounded memory; operator-visible via logs | Lost on process restart; retries only while agent is running | Accepted — restart scenario is rare; persistent queue adds deployment complexity disproportionate to the risk |
+| Persistent local file queue (e.g., `~/.mnemo/compact-queue.json`) | Survives process restart | Filesystem I/O in hot path; file locking; complicates plugin teardown | Rejected — overkill for a best-effort local queue |
+| Skip on error, no retry | Simplest code | Silent data loss; no operator visibility | Rejected — violates the explicit fail-safe requirement |
 
 **4. `tool_result_persist` transcript cleanup**
 
@@ -123,7 +196,24 @@ api.on("message_received", (event: unknown) => {
 });
 ```
 
+**Design note — alternatives considered for pre-warm cache:**
+
+| Option | Pros | Cons | Decision |
+|---|---|---|---|
+| **In-memory Promise cache keyed by prompt prefix (chosen)** | Zero deps; 3-min TTL bounds growth; `before_prompt_build` awaits an already-in-flight promise | Cache is process-local; does not survive restarts; stale on rapid prompt edits | Accepted — TTL and eviction-on-hit keep it safe; restart cost is one extra search latency |
+| No pre-warm (search at `before_prompt_build`) | Simplest code; no cache invalidation | Adds full search RTT to every user-visible prompt delay | Rejected — measurable UX regression, especially on remote mem9 servers |
+| Persistent cache (Redis / local file) | Survives restart | External dependency or filesystem I/O; over-engineered for a < 3 min TTL optimization | Rejected — complexity far exceeds benefit |
+
 **Phase 1 total: ~140 LoC — plugin only, no server changes**
+
+> **Effort re-estimate (Phase 1):**
+>
+> | Bucket | LoC |
+> |---|---|
+> | Implementation | ~140 |
+> | Contract validation (hook payload shapes verified against beta.1) | ~10 test assertions |
+> | Compatibility tests (pre-beta.1 + beta.1 codepaths) | ~30 |
+> | Release hardening (docs update, changelog) | ~20 prose lines |
 
 ---
 
@@ -144,6 +234,27 @@ Known gaps to resolve before writing real code:
 - `formatAndClean()` does not exist — must be extracted from `agent_end` handler in `hooks.ts`.
 - `ctx.session`, `ctx.latestPrompt`, `ctx.childAgentId` — field names unverified against beta.1.
 - `ContextEngineBootstrapCtx` / `ContextEngineAssembleCtx` etc. — type names unverified.
+
+**Contract-validation checklist (hard gate — must pass before any Phase 2 coding begins):**
+
+All items below must be verified against the actual beta.1 SDK source or changelog before
+writing `context-engine.ts`. This checklist is a merge requirement for Phase 2.
+
+| # | Item | SDK reference | Acceptance criteria |
+|---|---|---|---|
+| CV-1 | Capability detection mechanism | `api.capabilities?.contextEngine` (boolean) OR `typeof api.registerContextEngine === "function"` | Identify the correct guard; close Open Question 1 |
+| CV-2 | `ContextEngine` type name and import path | beta.1 type exports | Confirm `ContextEngine` is the exported interface name |
+| CV-3 | `bootstrap` ctx fields: `session.set`, `session.get` signatures | `ContextEngineBootstrapCtx` type | Confirm field names exactly |
+| CV-4 | `assemble` ctx fields: `latestPrompt` (or equivalent) | `ContextEngineAssembleCtx` type | Confirm field name; check if prompt may be undefined |
+| CV-5 | `ingest` ctx fields: `messages`, `sessionId`, `agentId` | `ContextEngineIngestCtx` type | Confirm all three field names |
+| CV-6 | `compact` ctx fields: same as `ingest` | `ContextEngineCompactCtx` type | Confirm; note whether compact and ingest share a base ctx type |
+| CV-7 | `prepareSubagentSpawn` ctx: `childAgentId` | `ContextEnginePrepareSpawnCtx` type | Confirm field name; confirm return shape `{pluginConfig:{...}}` |
+| CV-8 | `prepareSubagentSpawn` return — agent identity field name | `PluginConfig` in beta.1 | Current contract uses `agentName` (`types.ts:13`). Confirm whether child config uses `agentName` or a different field (see Contract Consistency note below) |
+| CV-9 | `message_received` payload: `prompt` field name | beta.1 hook payload types | Close Open Question 4 (hook payload shapes) |
+| CV-10 | `tool_result_persist` payload: `content` field name | beta.1 hook payload types | Close Open Question 4 |
+| CV-11 | `session:compact:before` payload: `messages`, `sessionId` field names | beta.1 hook payload types | Close Open Question 4 |
+| CV-12 | `allowPromptInjection` scope: hooks only, or also `assemble()` | beta.1 docs or source | Close Open Question 3 |
+| CV-13 | `prependSystemContext` supported by all configured providers | beta.1 provider matrix | Verify before enabling for pinned memories; add test case |
 
 ```ts
 // context-engine.ts (sketch — verify SDK types before implementing)
@@ -200,16 +311,22 @@ export function buildContextEngine(
       const selected = selectMessages(formatAndClean(c.messages), opts.maxIngestBytes);
       if (!selected.length) return;
       try {
-        await backend.ingest({
-          messages: selected,
-          session_id: c.sessionId ?? `ses_${Date.now()}`,
-          agent_id: c.agentId ?? "agent",
-          mode: "smart",
-        });
+        await Promise.race([
+          backend.ingest({
+            messages: selected,
+            session_id: c.sessionId ?? `ses_${Date.now()}`,
+            agent_id: c.agentId ?? "agent",
+            mode: "smart",
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5_000)),
+        ]);
         logger.info(`[mnemo] compact: flushed ${selected.length} messages`);
       } catch (err) {
-        // Log and proceed — do NOT block compaction on ingest failure
-        logger.error(`[mnemo] compact flush failed: ${String(err)} — window may be partially lost`);
+        // Log and enqueue for retry — do NOT block compaction on ingest failure.
+        // Retry logic (in-process queue with 30s worker, 3 max retries, 10-entry bound)
+        // is shared with the Phase 1 hook path. See compactQueue + retry worker in hooks.ts.
+        logger.error(`[mnemo] compact flush failed: ${String(err)} — queued for retry`);
+        enqueueCompactRetry(selected, c.sessionId ?? `ses_${Date.now()}`);
       }
       // Do NOT replace ctx.summary — let OpenClaw produce its structural summary
     },
@@ -218,7 +335,11 @@ export function buildContextEngine(
 
     async prepareSubagentSpawn(ctx: /* verify */ unknown) {
       const c = ctx as { childAgentId?: string };
-      return { pluginConfig: { tenantID: opts.tenantID, agentId: c.childAgentId ?? "subagent" } };
+      // NOTE: current contract uses `agentName` (types.ts:13, PluginConfig.agentName).
+      // `agentId` is NOT a PluginConfig field. Use `agentName` until CV-8 confirms the
+      // child plugin config field name for beta.1. This is a required contract fix before
+      // this sketch becomes real code.
+      return { pluginConfig: { tenantID: opts.tenantID, agentName: c.childAgentId ?? "subagent" } };
     },
 
     async onSubagentEnded(_ctx: unknown) {
@@ -262,10 +383,16 @@ Registration in `index.ts` (version-guarded):
 
 ```ts
 // Version-guarded: keep hooks for pre-beta.1 OpenClaw compatibility
+// `resolveTenantID` is the existing lazy-resolution function defined in register().
+// It resolves cfg.tenantID or auto-provisions. It is NOT a new field — it is the
+// same function already used to create LazyServerBackend for hooks.
 if (api.capabilities?.contextEngine) {
+  // tenantID must be resolved before registering the ContextEngine.
+  // Use the same resolveTenantID() function that LazyServerBackend uses.
+  const tenantID = await resolveTenantID(cfg.agentName ?? "agent");
   api.registerContextEngine(buildContextEngine(hookBackend, api.logger, {
     maxIngestBytes: cfg.maxIngestBytes,
-    tenantID: resolvedTenantID,
+    tenantID,                   // resolved string, not a lazy reference
   }));
   api.logger.info("[mnemo] ContextEngine mode active (beta.1+)");
 } else {
@@ -274,7 +401,23 @@ if (api.capabilities?.contextEngine) {
 }
 ```
 
+> **Contract note — `agentName` vs `agentId`**: The current `PluginConfig` (`types.ts:13`)
+> defines `agentName?: string` as the agent identity field. The sketch above uses `agentName`
+> consistently. Any new field added to `PluginConfig` for subagent identity must be named
+> `agentName` unless CV-8 validation reveals that beta.1 uses a different field name, in which
+> case both the type definition and this sketch must be updated together.
+
 **Phase 2 total: ~280 LoC — plugin only, no server changes**
+
+> **Effort re-estimate (Phase 2):**
+>
+> | Bucket | LoC / effort |
+> |---|---|
+> | Implementation (`context-engine.ts` + registration) | ~280 LoC |
+> | Contract validation (CV-1 through CV-13 checklist) | ~40 assertions / spike |
+> | Compatibility tests (pre-beta.1 path + beta.1 path, capability detection) | ~50 LoC |
+> | Migration note (PluginConfig field additions, agentName alignment) | ~10 LoC + changelog entry |
+> | Release hardening (README update, version bump) | ~15 prose lines |
 
 ---
 
@@ -318,10 +461,16 @@ Deferred until beta.1 stabilizes. Scope:
 
 | Scenario | Behavior |
 |---|---|
-| OpenClaw < beta.1 | Hook path active; compact remains a memory-loss event (no `session:compact:before`) |
+| OpenClaw < beta.1 | Hook path active; compact remains a memory-loss event (no `session:compact:before`); retry queue handles transient mem9 unavailability |
 | OpenClaw < beta.1, `/reset` used | `before_reset` saves last 3 user messages — partial mitigation only |
-| OpenClaw beta.1+, no `allowPromptInjection` | Startup warning logged; hook path active; injection may be stripped by framework |
-| OpenClaw beta.1+, `allowPromptInjection: true` | ContextEngine path active; full lifecycle ownership including safe compact |
+| OpenClaw beta.1+, `api.capabilities?.contextEngine` absent | Hook path active (same as pre-beta.1 row above); startup warning logged for `allowPromptInjection` |
+| OpenClaw beta.1+, `api.capabilities?.contextEngine` present | ContextEngine path active; full lifecycle ownership including safe compact with retry queue |
+| OpenClaw beta.1+, ContextEngine active, `allowPromptInjection` not set in openclaw.json | Startup warning logged; `assemble()` return values may or may not be suppressed depending on CV-12 outcome (see Risks) |
+
+> **Note**: ContextEngine activation is controlled by `api.capabilities?.contextEngine` — a
+> runtime capability flag. It is independent of `allowPromptInjection`, which is a host-side
+> hook policy that affects `before_prompt_build` injection. The prior draft incorrectly implied
+> that setting `allowPromptInjection: true` activates the ContextEngine path.
 
 ---
 
@@ -331,30 +480,65 @@ Deferred until beta.1 stabilizes. Scope:
 |---|---|
 | beta.1 ContextEngine API unstable before GA | Version guard; keep hook path as permanent fallback |
 | `compact` + `ingest` fire concurrently for the same session | **Not mitigated by server-side dedup** — ingest is not idempotent on `session_id`, no content-hash dedup exists. Mitigation: use a per-session in-memory flag (`compacting: Set<sessionId>`) to skip `ingest` while compact is in progress; or scope `compact` and `ingest` as mutually exclusive writers per session |
-| mem9 unavailable during compaction | `compact` catches errors and logs, then proceeds — compaction is not blocked. Window may be partially lost under outage. Acceptable tradeoff; retry is out of scope. |
+| mem9 unavailable during compaction | 5-second timeout + in-process retry queue (10-entry bound, 3 retries per batch, 30s retry cadence). Queue depth > 5 triggers `logger.error` for operator visibility. After 3 retries, batch is dropped with explicit error log. Compaction is never blocked. |
 | `assemble` token budget overshoot | Conservative estimate: 1 token ≈ 4 bytes; prefer under-injecting |
 | Pre-warm cache grows unbounded | 3-min TTL + Map key eviction on `before_prompt_build` hit |
-| `prependSystemContext` treated as mutable by some providers | Only put truly stable (`memory_type=pinned`) memories there; dynamic insights stay in `prependContext` |
+| `prependSystemContext` treated as mutable by some providers | **Verification test required (CV-13)**: Before enabling, add an integration test that sends a multi-turn conversation with a pinned memory in `prependSystemContext` and asserts (a) the memory appears in turn 1 context, (b) turn 2 does not re-charge tokens for it (provider cache hit). If the test fails for any configured provider, fall back to `prependContext` for that provider. Only put truly stable (`memory_type=pinned`) memories in `prependSystemContext`. |
+| `allowPromptInjection` scope unknown — may suppress `assemble()` too | **Verification test required (CV-12)**: On beta.1 with `allowPromptInjection` absent, call `assemble()` and assert its return value appears in the assembled context. If suppressed, add a dedicated `assemble()` capability check or emit a startup warning. Expected outcome: `assemble()` is NOT subject to `allowPromptInjection` (it is a ContextEngine method, not a hook); if that expectation is wrong, the risk escalates to a blocker. |
 
 ---
 
 ## Open Questions
 
-1. **Capability detection**: Does OpenClaw beta.1 expose `api.capabilities.contextEngine` as a
-   boolean, or is detection done via `typeof api.registerContextEngine === "function"`? Affects
-   version guard in `index.ts`.
-2. **ContextEngine SDK types**: Exact field names for `ctx.session`, `ctx.latestPrompt`,
-   `ctx.childAgentId`, `ctx.messages`, `ctx.sessionId`, `ctx.agentId` — need to verify against
-   beta.1 type exports before writing `context-engine.ts`.
-3. **`allowPromptInjection` scope**: Does this host policy also suppress ContextEngine
-   `assemble()` return values, or only hook-based `before_prompt_build` injection? Determines
-   whether `assemble()` needs a separate capability check.
-4. **Hook payload shapes**: Exact event payload fields for `message_received`,
-   `tool_result_persist`, and `session:compact:before` — unverified against beta.1.
-5. **Pinned memories scope**: Should `bootstrap` prefetch pinned memories globally for the
-   tenant, or scoped to the current `agent_id`? Affects the `SearchInput` call in bootstrap.
-6. **Versioning**: Should Phase 1 ship as a patch release and Phase 2 as a minor, given the
-   behavioral difference between hook and ContextEngine mode?
+Questions are categorized as **blocking** (must close before Phase 2 coding) or **non-blocking**.
+
+### Blocking Decisions
+
+These are not optional clarifications — they directly affect runtime behavior and API
+compatibility. Each must be closed before Phase 2 implementation begins (see CV checklist above).
+
+**DEC-1 — Capability detection mechanism**
+- **Decision**: Does OpenClaw beta.1 expose `api.capabilities.contextEngine` as a boolean, or
+  is detection done via `typeof api.registerContextEngine === "function"`?
+- **Owner**: plugin maintainer
+- **Due**: before Phase 2 sprint starts
+- **Acceptance criteria**: One of the two guards is confirmed by reading beta.1 source or
+  changelog; CV-1 is checked off; `index.ts` registration guard is updated accordingly.
+
+**DEC-2 — ContextEngine SDK type names and ctx field shapes**
+- **Decision**: Exact TypeScript type names for `ContextEngine`, `ContextEngineBootstrapCtx`,
+  `ContextEngineAssembleCtx`, `ContextEngineIngestCtx`, `ContextEngineCompactCtx`,
+  `ContextEnginePrepareSpawnCtx`; exact field names for `ctx.session`, `ctx.latestPrompt`,
+  `ctx.childAgentId`, `ctx.messages`, `ctx.sessionId`, `ctx.agentId`.
+- **Owner**: plugin maintainer
+- **Due**: before Phase 2 sprint starts
+- **Acceptance criteria**: CV-2 through CV-8 are all checked off; `context-engine.ts` replaces
+  all `/* verify */` casts with typed parameters.
+
+**DEC-3 — `allowPromptInjection` scope in ContextEngine mode**
+- **Decision**: Does the `allowPromptInjection` host policy suppress `assemble()` return values,
+  or does it only affect `before_prompt_build` hook injection?
+- **Owner**: plugin maintainer (verify against beta.1 docs or source)
+- **Due**: before Phase 2 sprint starts
+- **Acceptance criteria**: CV-12 verification test result is recorded; if `assemble()` is also
+  suppressed, a separate capability check or startup warning is added to `context-engine.ts`.
+
+**DEC-4 — Hook payload shapes for Phase 1 hooks**
+- **Decision**: Exact event payload field names for `message_received` (`prompt`?),
+  `tool_result_persist` (`content`?), and `session:compact:before` (`messages`?, `sessionId`?).
+- **Owner**: plugin maintainer
+- **Due**: before Phase 1 items 3-5 land
+- **Acceptance criteria**: CV-9, CV-10, CV-11 verified; all `as { field?: type }` casts in
+  `hooks.ts` replaced with assertions or types based on confirmed shapes.
+
+### Non-Blocking
+
+**Q5 — Pinned memories scope**: Should `bootstrap` prefetch pinned memories globally for the
+tenant, or scoped to the current `agent_id`? Affects the `SearchInput` call in bootstrap. Can
+be decided during Phase 2 implementation based on observed behavior.
+
+**Q6 — Versioning**: Should Phase 1 ship as a patch release and Phase 2 as a minor, given the
+behavioral difference between hook and ContextEngine mode? Decide during release prep.
 
 ---
 
@@ -362,10 +546,13 @@ Deferred until beta.1 stabilizes. Scope:
 
 1. **Now**: Land Phase 1 item 1 (`allowPromptInjection` startup warning) — prevents silent
    breakage for anyone already on beta.1. Low risk, no logic change.
-2. **This sprint**: Land Phase 1 items 2-5 (system context split, compact flush, transcript
-   cleanup, pre-warm) — all hook-surface, no API dependency, no server changes.
-3. **Before Phase 2**: Verify all Open Questions 1-4 against the beta.1 SDK. Export `Logger`
-   from `hooks.ts`; extract `formatAndClean()`. Add `memory_type`/`agent_id`/`session_id` to
+2. **This sprint**: Land Phase 1 items 2-5 (system context split, compact flush with retry
+   queue, transcript cleanup, pre-warm) — all hook-surface, no API dependency, no server
+   changes. Close DEC-4 (hook payload shapes, CV-9/10/11) before items 3-5 land.
+3. **Before Phase 2**: Close all four blocking decisions (DEC-1 through DEC-4) and pass the
+   full contract-validation checklist (CV-1 through CV-13). This is a hard gate — no Phase 2
+   code is written until every checklist item has an confirmed answer. Export `Logger` from
+   `hooks.ts`; extract `formatAndClean()`. Add `memory_type`/`agent_id`/`session_id` to
    `SearchInput` and `ServerBackend.search()`.
 4. **Next sprint**: Implement `context-engine.ts` behind the version guard — safe to merge to
    main before beta.1 GA since it is unreachable on older versions.
