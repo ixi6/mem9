@@ -1,6 +1,5 @@
 import path from "node:path";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { MemoryBackend } from "./backend.js";
 import type { IngestMessage, Memory } from "./types.js";
@@ -66,8 +65,6 @@ type Logger = {
   warn?: (msg: string) => void;
   error: (msg: string) => void;
 };
-
-const require = createRequire(import.meta.url);
 
 function escapeForPrompt(text: string): string {
   return text

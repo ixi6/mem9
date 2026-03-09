@@ -1,4 +1,5 @@
 declare const process: {
+  argv: string[];
   cwd: () => string;
 };
 
@@ -18,12 +19,6 @@ declare module "node:path" {
   };
 
   export default path;
-}
-
-declare module "node:module" {
-  export function createRequire(filename: string): {
-    resolve: (id: string) => string;
-  };
 }
 
 declare module "node:url" {
