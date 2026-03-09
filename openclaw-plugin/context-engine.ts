@@ -164,8 +164,11 @@ async function tryLegacyCompact(params: {
   legacyParams?: Record<string, unknown>;
 }): Promise<CompactResult | null> {
   try {
-    const pluginSdkEntry = require.resolve("openclaw/plugin-sdk");
-    const pluginSdkDir = path.dirname(pluginSdkEntry);
+    // Derive openclaw's plugin-sdk dir from process.argv[1] (openclaw entry point).
+    // This avoids require.resolve("openclaw/plugin-sdk") which fails when openclaw
+    // is not in the plugin's node_modules resolution chain.
+    const openclawDist = path.dirname(process.argv[1] ?? "");
+    const pluginSdkDir = path.join(openclawDist, "plugin-sdk");
     const runtimeCandidates = fs.readdirSync(pluginSdkDir)
       .filter((name) => /^compact\.runtime-.*\.js$/.test(name))
       .sort();
@@ -195,13 +198,18 @@ async function tryLegacyCompact(params: {
       };
       if (typeof mod.compactEmbeddedPiSessionDirect !== "function") continue;
 
+      // runtimeContext carries the full CompactEmbeddedPiSessionParams passed by OpenClaw
+      // (workspaceDir, config, model, provider, sessionKey, etc.). Spread it first so all
+      // required fields are present, then override with the explicit compact() params.
+      const runtimeContext = (params as unknown as Record<string, unknown>).runtimeContext as Record<string, unknown> ?? {};
       const result = await mod.compactEmbeddedPiSessionDirect({
+        workspaceDir: process.cwd(),
+        ...runtimeContext,
         sessionId: params.sessionId,
         sessionFile: params.sessionFile,
         tokenBudget: params.tokenBudget,
         force: params.force,
         customInstructions: params.customInstructions,
-        workspaceDir: process.cwd(),
       });
 
       return {
