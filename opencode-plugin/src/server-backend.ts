@@ -160,6 +160,6 @@ export class ServerBackend implements MemoryBackend {
       }
     }
 
-    throw new Mem9HttpError(resp.status, message, headerRequestID ?? bodyRequestID);
+    throw new Mem9HttpError(resp.status, message, bodyRequestID ?? headerRequestID);
   }
 }

@@ -202,6 +202,6 @@ export class ServerBackend implements MemoryBackend {
       message = `${context}: ${message}`;
     }
 
-    throw new Mem9HttpError(resp.status, message, headerRequestID ?? bodyRequestID);
+    throw new Mem9HttpError(resp.status, message, bodyRequestID ?? headerRequestID);
   }
 }
