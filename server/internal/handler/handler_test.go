@@ -64,6 +64,7 @@ func TestRequestIDHeader_OnHandlerError(t *testing.T) {
 			})
 		},
 		passthroughMW,
+		passthroughMW,
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1alpha1/mem9s/test-tenant/memories", nil)
@@ -87,6 +88,7 @@ func TestRequestIDHeader_OnAuthFailure(t *testing.T) {
 	srv := newTestServer()
 	router := srv.Router(
 		blockingMW(http.StatusNotFound, "tenant not found"),
+		passthroughMW,
 		passthroughMW,
 	)
 
@@ -112,6 +114,7 @@ func TestRequestIDHeader_OnForbidden(t *testing.T) {
 	router := srv.Router(
 		blockingMW(http.StatusForbidden, "tenant not active"),
 		passthroughMW,
+		passthroughMW,
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1alpha1/mem9s/inactive-tenant/memories", nil)
@@ -136,6 +139,7 @@ func TestRequestIDHeader_OnRateLimit(t *testing.T) {
 	router := srv.Router(
 		passthroughMW,
 		blockingMW(http.StatusTooManyRequests, "rate limit exceeded"),
+		passthroughMW,
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1alpha1/mem9s/any-tenant/memories", nil)
@@ -157,7 +161,7 @@ func TestRequestIDHeader_OnRateLimit(t *testing.T) {
 
 func TestRequestIDHeader_OnChiNative404(t *testing.T) {
 	srv := newTestServer()
-	router := srv.Router(passthroughMW, passthroughMW)
+	router := srv.Router(passthroughMW, passthroughMW, passthroughMW)
 
 	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
 	rec := httptest.NewRecorder()
@@ -182,7 +186,7 @@ func TestRequestIDHeader_OnChiNative404(t *testing.T) {
 
 func TestRequestIDHeader_OnChiNative405(t *testing.T) {
 	srv := newTestServer()
-	router := srv.Router(passthroughMW, passthroughMW)
+	router := srv.Router(passthroughMW, passthroughMW, passthroughMW)
 
 	req := httptest.NewRequest(http.MethodPatch, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -199,7 +203,7 @@ func TestRequestIDHeader_OnChiNative405(t *testing.T) {
 func TestRealAuthMiddleware_TenantNotFound(t *testing.T) {
 	srv := newTestServer()
 	tenantMW := middleware.ResolveTenant(stubTenantRepo{}, nil)
-	router := srv.Router(tenantMW, passthroughMW)
+	router := srv.Router(tenantMW, passthroughMW, passthroughMW)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1alpha1/mem9s/no-such-tenant/memories", nil)
 	rec := httptest.NewRecorder()

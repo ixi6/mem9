@@ -74,23 +74,23 @@ func ResolveApiKey(
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			apiKey := r.Header.Get(APIKeyHeader)
 			if apiKey == "" {
-				writeError(w, http.StatusBadRequest, "missing API key")
+				writeError(w, r, http.StatusBadRequest, "missing API key")
 				return
 			}
 
 			t, err := tenantRepo.GetByID(r.Context(), apiKey)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid API key")
+				writeError(w, r, http.StatusBadRequest, "invalid API key")
 				return
 			}
 			if t.Status != domain.TenantActive {
-				writeError(w, http.StatusBadRequest, "invalid API key")
+				writeError(w, r, http.StatusBadRequest, "invalid API key")
 				return
 			}
 
 			db, err := pool.Get(r.Context(), t.ID, t.DSNForBackend(pool.Backend()))
 			if err != nil {
-				writeError(w, http.StatusServiceUnavailable, "cannot connect to tenant database")
+				writeError(w, r, http.StatusServiceUnavailable, "cannot connect to tenant database")
 				return
 			}
 
