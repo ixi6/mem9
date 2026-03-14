@@ -754,3 +754,37 @@ func vecToString(embedding []float32) any {
 	sb.WriteByte(']')
 	return sb.String()
 }
+
+// GetPredecessorChain returns archived memories that were superseded by the given memory ID.
+// It follows superseded_by links backwards (archived memories where superseded_by = id).
+// maxDepth limits traversal (0 = default of 2, capped at 10).
+func (r *MemoryRepo) GetPredecessorChain(ctx context.Context, id string, maxDepth int) ([]domain.Memory, error) {
+	if maxDepth <= 0 {
+		maxDepth = 2
+	}
+	if maxDepth > 10 {
+		maxDepth = 10
+	}
+
+	var chain []domain.Memory
+	currentID := id
+
+	for depth := 0; depth < maxDepth; depth++ {
+		// Find archived memory where superseded_by = currentID
+		row := r.db.QueryRowContext(ctx,
+			`SELECT `+allColumns+` FROM memories WHERE superseded_by = ? AND state = 'archived' LIMIT 1`,
+			currentID,
+		)
+		mem, err := scanMemory(row)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				break // No more predecessors
+			}
+			return nil, fmt.Errorf("get predecessor chain: %w", err)
+		}
+		chain = append(chain, *mem)
+		currentID = mem.ID
+	}
+
+	return chain, nil
+}

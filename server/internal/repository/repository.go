@@ -36,6 +36,11 @@ type MemoryRepo interface {
 	FTSAvailable() bool
 
 	ListBootstrap(ctx context.Context, limit int) ([]domain.Memory, error)
+
+	// GetPredecessorChain returns the chain of archived memories that were superseded
+	// by the given memory ID, following superseded_by links backwards.
+	// maxDepth limits traversal depth (0 = no limit, but capped at 10 internally).
+	GetPredecessorChain(ctx context.Context, id string, maxDepth int) ([]domain.Memory, error)
 }
 
 // TenantRepo manages tenant records in the control plane DB.

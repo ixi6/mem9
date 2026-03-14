@@ -46,6 +46,14 @@ type Memory struct {
 	UpdatedAt time.Time   `json:"updated_at"`
 
 	Score *float64 `json:"score,omitempty"`
+
+	// Age is a human-readable relative time computed at response time (e.g., "5 minutes ago").
+	// Not stored in the database.
+	Age string `json:"age,omitempty"`
+
+	// History contains predecessor memories that this memory superseded.
+	// Only populated when include_history=true query param is set.
+	History []Memory `json:"history,omitempty"`
 }
 
 type AuthInfo struct {
@@ -68,6 +76,10 @@ type MemoryFilter struct {
 	Limit      int
 	Offset     int
 	MinScore   float64 // minimum cosine similarity for vector results; 0 = use default (0.3); -1 = disabled (return all)
+
+	// IncludeHistory indicates whether to include the predecessor chain for each memory.
+	// When true, memories that supersede archived ones will include their history.
+	IncludeHistory bool
 }
 
 // TenantStatus represents the lifecycle status of a tenant.
@@ -140,4 +152,51 @@ type TenantInfo struct {
 	Provider    string       `json:"provider"`
 	MemoryCount int          `json:"memory_count"`
 	CreatedAt   time.Time    `json:"created_at"`
+}
+
+// FormatAge returns a human-readable relative time string based on the given time.
+// Examples: "5 minutes ago", "2 hours ago", "3 days ago", "2 weeks ago", "6 months ago", "1 year ago"
+func FormatAge(t time.Time) string {
+	d := time.Since(t)
+
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	case d < 7*24*time.Hour:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	case d < 30*24*time.Hour:
+		weeks := int(d.Hours() / (24 * 7))
+		if weeks == 1 {
+			return "1 week ago"
+		}
+		return fmt.Sprintf("%d weeks ago", weeks)
+	case d < 365*24*time.Hour:
+		months := int(d.Hours() / (24 * 30))
+		if months == 1 {
+			return "1 month ago"
+		}
+		return fmt.Sprintf("%d months ago", months)
+	default:
+		years := int(d.Hours() / (24 * 365))
+		if years == 1 {
+			return "1 year ago"
+		}
+		return fmt.Sprintf("%d years ago", years)
+	}
 }

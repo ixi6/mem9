@@ -528,3 +528,9 @@ func validateMemoryInput(content string, tags []string) error {
 	}
 	return nil
 }
+
+// GetPredecessorChain returns the chain of archived memories that were superseded
+// by the given memory ID.
+func (s *MemoryService) GetPredecessorChain(ctx context.Context, id string, maxDepth int) ([]domain.Memory, error) {
+	return s.memories.GetPredecessorChain(ctx, id, maxDepth)
+}

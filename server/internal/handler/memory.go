@@ -13,6 +13,20 @@ import (
 	"github.com/qiffang/mnemos/server/internal/service"
 )
 
+// computeAge sets the Age field on memories based on their UpdatedAt timestamp.
+func computeAge(memories []domain.Memory) {
+	for i := range memories {
+		memories[i].Age = domain.FormatAge(memories[i].UpdatedAt)
+	}
+}
+
+// computeAgePtr sets the Age field on a single memory pointer.
+func computeAgePtr(mem *domain.Memory) {
+	if mem != nil {
+		mem.Age = domain.FormatAge(mem.UpdatedAt)
+	}
+}
+
 type createMemoryRequest struct {
 	Content   string                  `json:"content,omitempty"`
 	AgentID   string                  `json:"agent_id,omitempty"`
@@ -122,16 +136,19 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 		tags = strings.Split(t, ",")
 	}
 
+	includeHistory := q.Get("include_history") == "true"
+
 	filter := domain.MemoryFilter{
-		Query:      q.Get("q"),
-		Tags:       tags,
-		Source:     q.Get("source"),
-		State:      q.Get("state"),
-		MemoryType: q.Get("memory_type"),
-		AgentID:    q.Get("agent_id"),
-		SessionID:  q.Get("session_id"),
-		Limit:      limit,
-		Offset:     offset,
+		Query:          q.Get("q"),
+		Tags:           tags,
+		Source:         q.Get("source"),
+		State:          q.Get("state"),
+		MemoryType:     q.Get("memory_type"),
+		AgentID:        q.Get("agent_id"),
+		SessionID:      q.Get("session_id"),
+		Limit:          limit,
+		Offset:         offset,
+		IncludeHistory: includeHistory,
 	}
 	svc := s.resolveServices(auth)
 	memories, total, err := svc.memory.Search(r.Context(), filter)
@@ -142,6 +159,14 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 
 	if memories == nil {
 		memories = []domain.Memory{}
+	}
+
+	// Compute age for all memories
+	computeAge(memories)
+
+	// Fetch history chain if requested
+	if includeHistory {
+		s.attachHistory(r.Context(), svc, memories)
 	}
 
 	respond(w, http.StatusOK, listResponse{
@@ -161,6 +186,18 @@ func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.handleError(w, err)
 		return
+	}
+
+	// Compute age
+	computeAgePtr(mem)
+
+	// Check if history is requested
+	if r.URL.Query().Get("include_history") == "true" {
+		history, histErr := svc.memory.GetPredecessorChain(r.Context(), id, 2)
+		if histErr == nil && len(history) > 0 {
+			computeAge(history)
+			mem.History = history
+		}
 	}
 
 	respond(w, http.StatusOK, mem)
@@ -193,6 +230,9 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
 		s.handleError(w, err)
 		return
 	}
+
+	// Compute age
+	computeAgePtr(mem)
 
 	w.Header().Set("ETag", strconv.Itoa(mem.Version))
 	respond(w, http.StatusOK, mem)
@@ -230,6 +270,9 @@ func (s *Server) bulkCreateMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compute age for all memories
+	computeAge(memories)
+
 	respond(w, http.StatusCreated, map[string]any{
 		"ok":       true,
 		"memories": memories,
@@ -255,8 +298,22 @@ func (s *Server) bootstrapMemories(w http.ResponseWriter, r *http.Request) {
 		memories = []domain.Memory{}
 	}
 
+	// Compute age for all memories
+	computeAge(memories)
+
 	respond(w, http.StatusOK, map[string]any{
 		"memories": memories,
 		"total":    len(memories),
 	})
+}
+
+// attachHistory fetches and attaches the predecessor chain for each memory.
+func (s *Server) attachHistory(ctx context.Context, svc *resolvedServices, memories []domain.Memory) {
+	for i := range memories {
+		history, err := svc.memory.GetPredecessorChain(ctx, memories[i].ID, 2)
+		if err == nil && len(history) > 0 {
+			computeAge(history)
+			memories[i].History = history
+		}
+	}
 }
