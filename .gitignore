@@ -30,7 +30,16 @@ Thumbs.db
 node_modules/
 dist/
 *.tgz
+.netlify/
+
+# Benchmark results
+benchmark/results/*
+!benchmark/results/.gitkeep
 
 # Claude Code
 .claude/
 __pycache__/
+/benchmark/MR-NIAH/origin/
+/benchmark/MR-NIAH/output/
+/benchmark/MR-NIAH/results*/
+/benchmark/MR-NIAH/.cache/

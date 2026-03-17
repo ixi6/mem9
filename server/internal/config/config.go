@@ -13,6 +13,9 @@ type Config struct {
 	RateLimit float64
 	RateBurst int
 
+	// DBBackend selects the database driver: "tidb" (default), "postgres", or "db9".
+	DBBackend string
+
 	// Auto-embedding: TiDB Serverless generates embeddings via EMBED_TEXT().
 	// When set, takes priority over client-side embedding.
 	// Example: "tidbcloud_free/amazon/titan-embed-text-v2"
@@ -38,6 +41,10 @@ type Config struct {
 	TenantPoolIdleTimeout time.Duration
 	TenantPoolTotalLimit  int
 
+	// TiDB Cloud Pool configuration
+	TiDBCloudAPIURL    string
+	TiDBCloudPoolID    string
+
 	// FTSEnabled controls whether full-text search is attempted.
 	// Set MNEMO_FTS_ENABLED=true only when the TiDB cluster supports
 	// FULLTEXT INDEX and FTS_MATCH_WORD with constant strings.
@@ -62,6 +69,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                  envOr("MNEMO_PORT", "8080"),
 		DSN:                   dsn,
+		DBBackend:             envOr("MNEMO_DB_BACKEND", "tidb"),
 		RateLimit:             envFloat("MNEMO_RATE_LIMIT", 100),
 		RateBurst:             envInt("MNEMO_RATE_BURST", 200),
 		EmbedAutoModel:        os.Getenv("MNEMO_EMBED_AUTO_MODEL"),
@@ -77,6 +85,8 @@ func Load() (*Config, error) {
 		IngestMode:            envOr("MNEMO_INGEST_MODE", "smart"),
 		TiDBZeroEnabled:       envBool("MNEMO_TIDB_ZERO_ENABLED", true),
 		TiDBZeroAPIURL:        envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
+		TiDBCloudAPIURL:       envOr("MNEMO_TIDBCLOUD_API_URL", "https://serverless.tidbapi.com"),
+		TiDBCloudPoolID:       envOr("MNEMO_TIDBCLOUD_POOL_ID", "2"),
 		TenantPoolMaxIdle:     envInt("MNEMO_TENANT_POOL_MAX_IDLE", 5),
 		TenantPoolMaxOpen:     envInt("MNEMO_TENANT_POOL_MAX_OPEN", 10),
 		TenantPoolIdleTimeout: envDuration("MNEMO_TENANT_POOL_IDLE_TIMEOUT", 10*time.Minute),
@@ -91,6 +101,14 @@ func Load() (*Config, error) {
 		// ok
 	default:
 		return nil, fmt.Errorf("unsupported MNEMO_INGEST_MODE %q; valid values are \"smart\" and \"raw\"", cfg.IngestMode)
+	}
+
+	// Validate DB backend.
+	switch cfg.DBBackend {
+	case "tidb", "postgres", "db9":
+		// ok
+	default:
+		return nil, fmt.Errorf("unsupported MNEMO_DB_BACKEND %q; valid values are \"tidb\", \"postgres\", and \"db9\"", cfg.DBBackend)
 	}
 
 	return cfg, nil

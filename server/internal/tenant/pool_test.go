@@ -35,7 +35,8 @@ func (f failingConn) Ping(ctx context.Context) error {
 }
 
 func init() {
-	sql.Register("mysql", failingDriver{})
+	// Use a unique driver name for testing to avoid conflicts with real mysql driver
+	sql.Register("mysql_test", failingDriver{})
 }
 
 func TestNewPool_Defaults(t *testing.T) {
@@ -91,7 +92,7 @@ func TestPool_Get_InvalidDSN(t *testing.T) {
 	pool := NewPool(PoolConfig{})
 	defer pool.Close()
 
-	dsn := "user:pass@tcp(127.0.0.1:1)/db?parseTime=true"
+	dsn := "mysql_test://user:pass@tcp(127.0.0.1:1)/db?parseTime=true"
 	_, err := pool.Get(context.Background(), "tenant-1", dsn)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -130,7 +131,7 @@ func TestPool_TotalLimit(t *testing.T) {
 	pool := NewPool(PoolConfig{TotalLimit: 1})
 	defer pool.Close()
 
-	db, err := sql.Open("mysql", "user:pass@tcp(127.0.0.1:1)/db?parseTime=true")
+	db, err := sql.Open("mysql_test", "user:pass@tcp(127.0.0.1:1)/db?parseTime=true")
 	if err != nil {
 		t.Fatalf("sql.Open error: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestPool_TotalLimit(t *testing.T) {
 	pool.conns["tenant-1"] = &tenantConn{db: db, lastUsed: time.Now(), tenantID: "tenant-1"}
 	pool.mu.Unlock()
 
-	_, err = pool.Get(context.Background(), "tenant-2", "user:pass@tcp(127.0.0.1:1)/db?parseTime=true")
+	_, err = pool.Get(context.Background(), "tenant-2", "mysql_test://user:pass@tcp(127.0.0.1:1)/db?parseTime=true")
 	if err == nil {
 		t.Fatal("expected total limit error, got nil")
 	}

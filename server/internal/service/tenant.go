@@ -2,65 +2,29 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/qiffang/mnemos/server/internal/domain"
+	"github.com/qiffang/mnemos/server/internal/metrics"
 	"github.com/qiffang/mnemos/server/internal/repository"
 	"github.com/qiffang/mnemos/server/internal/tenant"
 )
 
-const tenantMemorySchemaBase = `CREATE TABLE IF NOT EXISTS memories (
-	    id              VARCHAR(36)     PRIMARY KEY,
-	    content         TEXT            NOT NULL,
-	    source          VARCHAR(100),
-	    tags            JSON,
-	    metadata        JSON,
-	    %s
-	    memory_type     VARCHAR(20)     NOT NULL DEFAULT 'pinned',
-	    agent_id        VARCHAR(100)    NULL,
-	    session_id      VARCHAR(100)    NULL,
-	    state           VARCHAR(20)     NOT NULL DEFAULT 'active',
-	    version         INT             DEFAULT 1,
-	    updated_by      VARCHAR(100),
-	    superseded_by   VARCHAR(36)     NULL,
-	    created_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
-	    updated_at      TIMESTAMP       DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	    INDEX idx_memory_type         (memory_type),
-	    INDEX idx_source              (source),
-	    INDEX idx_state               (state),
-	    INDEX idx_agent               (agent_id),
-	    INDEX idx_session             (session_id),
-	    INDEX idx_updated             (updated_at)
-	)`
-
-func buildMemorySchema(autoModel string, autoDims int) string {
-	var embeddingCol string
-	if autoModel != "" {
-		dims := strconv.Itoa(autoDims)
-		embeddingCol = `embedding VECTOR(` + dims + `) GENERATED ALWAYS AS (EMBED_TEXT('` + autoModel + `', content)) STORED,`
-	} else {
-		embeddingCol = `embedding VECTOR(1536) NULL,`
-	}
-	return fmt.Sprintf(tenantMemorySchemaBase, embeddingCol)
-}
-
 type TenantService struct {
-	tenants    repository.TenantRepo
-	zero       *tenant.ZeroClient
-	pool       *tenant.TenantPool
-	logger     *slog.Logger
-	autoModel  string
-	autoDims   int
-	ftsEnabled bool
+	tenants     repository.TenantRepo
+	provisioner tenant.Provisioner
+	pool        *tenant.TenantPool
+	logger      *slog.Logger
+	autoModel   string
+	autoDims    int
+	ftsEnabled  bool
 }
 
 func NewTenantService(
 	tenants repository.TenantRepo,
-	zero *tenant.ZeroClient,
+	provisioner tenant.Provisioner,
 	pool *tenant.TenantPool,
 	logger *slog.Logger,
 	autoModel string,
@@ -68,13 +32,13 @@ func NewTenantService(
 	ftsEnabled bool,
 ) *TenantService {
 	return &TenantService{
-		tenants:    tenants,
-		zero:       zero,
-		pool:       pool,
-		logger:     logger,
-		autoModel:  autoModel,
-		autoDims:   autoDims,
-		ftsEnabled: ftsEnabled,
+		tenants:     tenants,
+		provisioner: provisioner,
+		pool:        pool,
+		logger:      logger,
+		autoModel:   autoModel,
+		autoDims:    autoDims,
+		ftsEnabled:  ftsEnabled,
 	}
 }
 
@@ -83,57 +47,108 @@ type ProvisionResult struct {
 	ID string `json:"id"`
 }
 
-// Provision creates a new TiDB Zero instance and registers it as a tenant.
-// The TiDB Zero instance ID is used as the tenant ID.
+// Provision creates a new cluster and registers it as a tenant.
 func (s *TenantService) Provision(ctx context.Context) (*ProvisionResult, error) {
-	if s.zero == nil {
-		return nil, &domain.ValidationError{Message: "provisioning disabled (TiDB Zero not configured)"}
+	if s.pool == nil {
+		return nil, fmt.Errorf("tenant pool not configured")
+	}
+	if s.pool.Backend() != "tidb" {
+		return nil, &domain.ValidationError{Message: fmt.Sprintf("auto-provisioning requires tidb backend; got %q", s.pool.Backend())}
+	}
+	if s.provisioner == nil {
+		return nil, &domain.ValidationError{Message: "provisioning not configured"}
 	}
 
-	instance, err := s.zero.CreateInstance(ctx, "mem9s")
+	total := time.Now()
+
+	// Step 1: Acquire cluster from provisioner
+	t0 := time.Now()
+	info, err := s.provisioner.Provision(ctx)
+	elapsed := time.Since(t0)
+	providerType := s.provisioner.ProviderType()
+	s.logger.Info("provision step", "step", "cluster_acquire", "provider", providerType, "duration_ms", elapsed.Milliseconds())
+	metrics.ProvisionStepDuration.WithLabelValues("cluster_acquire_" + providerType).Observe(elapsed.Seconds())
 	if err != nil {
-		return nil, fmt.Errorf("provision TiDB Zero instance: %w", err)
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
+		return nil, fmt.Errorf("provision cluster: %w", err)
 	}
 
-	// Use the TiDB Zero instance ID as the tenant ID.
-	tenantID := instance.ID
-
+	// Build tenant record
 	t := &domain.Tenant{
-		ID:             tenantID,
-		Name:           tenantID, // Use ID as name for auto-provisioned tenants.
-		DBHost:         instance.Host,
-		DBPort:         instance.Port,
-		DBUser:         instance.Username,
-		DBPassword:     instance.Password,
-		DBName:         "test",
+		ID:             info.ID,
+		Name:           info.ID,
+		DBHost:         info.Host,
+		DBPort:         info.Port,
+		DBUser:         info.Username,
+		DBPassword:     info.Password,
+		DBName:         info.DBName,
 		DBTLS:          true,
-		Provider:       "tidb_zero",
-		ClusterID:      instance.ID,
-		ClaimURL:       instance.ClaimURL,
-		ClaimExpiresAt: instance.ClaimExpiresAt,
+		Provider:       providerType,
+		ClusterID:      info.ClusterID,
+		ClaimURL:       info.ClaimURL,
+		ClaimExpiresAt: info.ClaimExpiresAt,
 		Status:         domain.TenantProvisioning,
 		SchemaVersion:  0,
 	}
+
+	t0 = time.Now()
 	if err := s.tenants.Create(ctx, t); err != nil {
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
+		s.logger.Error("orphaned cluster: tenants.Create failed",
+			"tenant_id", info.ID,
+			"cluster_id", info.ClusterID,
+			"provider", providerType,
+			"err", err)
 		return nil, fmt.Errorf("create tenant record: %w", err)
 	}
+	elapsed = time.Since(t0)
+	s.logger.Info("provision step", "step", "create_tenant_record", "duration_ms", elapsed.Milliseconds())
+	metrics.ProvisionStepDuration.WithLabelValues("create_tenant_record").Observe(elapsed.Seconds())
 
-	if err := s.initSchema(ctx, t); err != nil {
+	// Get DB connection for schema initialization
+	db, err := s.pool.Get(ctx, info.ID, t.DSNForBackend(s.pool.Backend()))
+	if err != nil {
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
+		return nil, fmt.Errorf("get tenant db: %w", err)
+	}
+
+	t0 = time.Now()
+	if err := s.provisioner.InitSchema(ctx, db); err != nil {
 		if s.logger != nil {
-			s.logger.Error("tenant schema init failed", "tenant_id", tenantID, "err", err)
+			s.logger.Error("tenant schema init failed", "tenant_id", info.ID, "err", err)
 		}
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("init tenant schema: %w", err)
 	}
+	elapsed = time.Since(t0)
+	s.logger.Info("provision step", "step", "init_schema", "duration_ms", elapsed.Milliseconds())
+	metrics.ProvisionStepDuration.WithLabelValues("init_schema").Observe(elapsed.Seconds())
 
-	if err := s.tenants.UpdateStatus(ctx, tenantID, domain.TenantActive); err != nil {
-		return nil, fmt.Errorf("activate tenant: %w", err)
-	}
-	if err := s.tenants.UpdateSchemaVersion(ctx, tenantID, 1); err != nil {
+	t0 = time.Now()
+	if err := s.tenants.UpdateSchemaVersion(ctx, info.ID, 1); err != nil {
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("update schema version: %w", err)
 	}
+	elapsed = time.Since(t0)
+	s.logger.Info("provision step", "step", "update_schema_version", "duration_ms", elapsed.Milliseconds())
+	metrics.ProvisionStepDuration.WithLabelValues("update_schema_version").Observe(elapsed.Seconds())
+
+	t0 = time.Now()
+	if err := s.tenants.UpdateStatus(ctx, info.ID, domain.TenantActive); err != nil {
+		metrics.ProvisionTotal.WithLabelValues("error").Inc()
+		return nil, fmt.Errorf("activate tenant: %w", err)
+	}
+	elapsed = time.Since(t0)
+	s.logger.Info("provision step", "step", "update_status", "duration_ms", elapsed.Milliseconds())
+	metrics.ProvisionStepDuration.WithLabelValues("update_status").Observe(elapsed.Seconds())
+
+	totalElapsed := time.Since(total)
+	s.logger.Info("provision step", "step", "total", "duration_ms", totalElapsed.Milliseconds(), "tenant_id", info.ID)
+	metrics.ProvisionStepDuration.WithLabelValues("total").Observe(totalElapsed.Seconds())
+	metrics.ProvisionTotal.WithLabelValues("success").Inc()
 
 	return &ProvisionResult{
-		ID: tenantID,
+		ID: info.ID,
 	}, nil
 }
 
@@ -147,7 +162,7 @@ func (s *TenantService) GetInfo(ctx context.Context, tenantID string) (*domain.T
 	if s.pool == nil {
 		return nil, fmt.Errorf("tenant pool not configured")
 	}
-	db, err := s.pool.Get(ctx, tenantID, t.DSN())
+	db, err := s.pool.Get(ctx, tenantID, t.DSNForBackend(s.pool.Backend()))
 	if err != nil {
 		return nil, err
 	}
@@ -165,40 +180,4 @@ func (s *TenantService) GetInfo(ctx context.Context, tenantID string) (*domain.T
 		MemoryCount: count,
 		CreatedAt:   t.CreatedAt,
 	}, nil
-}
-
-func (s *TenantService) initSchema(ctx context.Context, t *domain.Tenant) error {
-	if s.pool == nil {
-		return fmt.Errorf("tenant pool not configured")
-	}
-	db, err := s.pool.Get(ctx, t.ID, t.DSN())
-	if err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, buildMemorySchema(s.autoModel, s.autoDims)); err != nil {
-		return fmt.Errorf("init tenant schema: memories: %w", err)
-	}
-	if s.autoModel != "" {
-		_, err := db.ExecContext(ctx,
-			`ALTER TABLE memories ADD VECTOR INDEX idx_cosine ((VEC_COSINE_DISTANCE(embedding))) ADD_COLUMNAR_REPLICA_ON_DEMAND`)
-		if err != nil && !isIndexExistsError(err) {
-			return fmt.Errorf("init tenant schema: vector index: %w", err)
-		}
-	}
-	if s.ftsEnabled {
-		_, err := db.ExecContext(ctx,
-			`ALTER TABLE memories ADD FULLTEXT INDEX idx_fts_content (content) WITH PARSER MULTILINGUAL ADD_COLUMNAR_REPLICA_ON_DEMAND`)
-		if err != nil && !isIndexExistsError(err) {
-			return fmt.Errorf("init tenant schema: fulltext index: %w", err)
-		}
-	}
-	return nil
-}
-
-func isIndexExistsError(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return mysqlErr.Number == 1061
-	}
-	return false
 }

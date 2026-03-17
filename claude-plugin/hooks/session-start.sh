@@ -27,7 +27,7 @@ try:
     memories = data.get('memories', [])
     if not memories:
         sys.exit(0)
-    lines = ['[mnemo] Shared memories from your team:']
+    lines = ['[mem9] Shared memories from your team:']
     lines.append('')
     for m in memories:
         tags = ', '.join(m.get('tags') or [])
@@ -44,7 +44,9 @@ try:
         # Truncate very long content for context injection.
         if len(content) > 500:
             content = content[:500] + '...'
-        lines.append(f'  {content}')
+        age = m.get('relative_age', '')
+        age_prefix = f'({age}) ' if age else ''
+        lines.append(f'  {age_prefix}{content}')
         lines.append('')
     print('\n'.join(lines))
 except Exception:
@@ -56,12 +58,12 @@ if [[ -z "$context" ]]; then
 fi
 
 # Return additionalContext to inject into Claude's context.
-MNEMO_CONTEXT="$context" python3 -c "
+MEM9_CONTEXT="$context" python3 -c "
 import json, os
 output = {
     'hookSpecificOutput': {
         'hookEventName': 'SessionStart',
-        'additionalContext': os.environ['MNEMO_CONTEXT']
+        'additionalContext': os.environ['MEM9_CONTEXT']
     }
 }
 print(json.dumps(output))

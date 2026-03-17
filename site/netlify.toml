@@ -1,0 +1,21 @@
+# Keep `site` as the Netlify package directory and leave the base directory unset.
+# Netlify will load this file from `site/`, but resolve build paths from the repo root.
+[build]
+  command = "bash ./site/scripts/netlify-build.sh"
+  publish = "site/dist"
+  ignore = "if [ -z \"$CACHED_COMMIT_REF\" ]; then exit 1; fi; git diff --quiet \"$CACHED_COMMIT_REF\" \"$COMMIT_REF\" -- site dashboard/app"
+
+[[redirects]]
+  from = "/your-memory/api/*"
+  to = "https://api.mem9.ai/v1alpha2/mem9s/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/your-memory/analysis-api/*"
+  to = "https://napi.mem9.ai/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/your-memory/*"
+  to = "/your-memory/index.html"
+  status = 200

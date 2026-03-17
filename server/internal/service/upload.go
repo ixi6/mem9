@@ -17,7 +17,6 @@ import (
 	"github.com/qiffang/mnemos/server/internal/embed"
 	"github.com/qiffang/mnemos/server/internal/llm"
 	"github.com/qiffang/mnemos/server/internal/repository"
-	"github.com/qiffang/mnemos/server/internal/repository/tidb"
 	"github.com/qiffang/mnemos/server/internal/tenant"
 )
 
@@ -162,12 +161,12 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 		return w.failTask(ctx, task, fmt.Errorf("resolve tenant: %w", err), logger)
 	}
 
-	db, err := w.pool.Get(taskCtx, tenantInfo.ID, tenantInfo.DSN())
+	db, err := w.pool.Get(taskCtx, tenantInfo.ID, tenantInfo.DSNForBackend(w.pool.Backend()))
 	if err != nil {
 		return w.failTask(ctx, task, fmt.Errorf("get tenant db: %w", err), logger)
 	}
 
-	memRepo := tidb.NewMemoryRepo(db, w.autoModel, w.ftsEnabled)
+	memRepo := repository.NewMemoryRepo(w.pool.Backend(), db, w.autoModel, w.ftsEnabled, tenantInfo.ClusterID)
 	ingestSvc := NewIngestService(memRepo, w.llmClient, w.embedder, w.autoModel, w.mode)
 
 	data, err := os.ReadFile(task.FilePath)
@@ -241,12 +240,9 @@ func (w *UploadWorker) processTask(ctx context.Context, task domain.UploadTask) 
 		}
 
 	case domain.FileTypeMemory:
-		var file MemoryFile
-		if err := json.Unmarshal(data, &file); err != nil {
+		file, err := parseMemoryFile(data, task.AgentID)
+		if err != nil {
 			return w.failTask(ctx, task, fmt.Errorf("parse memory file: %w", err), logger)
-		}
-		if file.AgentID == "" {
-			file.AgentID = task.AgentID
 		}
 
 		// Handle empty file: mark done immediately
@@ -367,6 +363,32 @@ func marshalMetadata(metadata map[string]any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(b), nil
+}
+
+// parseMemoryFile parses upload data as a MemoryFile.
+// It accepts two formats:
+//   - JSON: {"agent_id":"...","memories":[{"content":"..."},...]}
+//   - Markdown/plain-text: the entire file becomes a single memory entry.
+func parseMemoryFile(data []byte, fallbackAgentID string) (MemoryFile, error) {
+	var file MemoryFile
+	if err := json.Unmarshal(data, &file); err == nil && len(file.Memories) > 0 {
+		if file.AgentID == "" {
+			file.AgentID = fallbackAgentID
+		}
+		return file, nil
+	}
+
+	// Fall back: treat the entire payload as Markdown / plain-text.
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return MemoryFile{AgentID: fallbackAgentID}, nil
+	}
+	return MemoryFile{
+		AgentID: fallbackAgentID,
+		Memories: []MemoryFileEntry{
+			{Content: content},
+		},
+	}, nil
 }
 
 // parseSessionFile tries to parse data as a JSON SessionFile first.

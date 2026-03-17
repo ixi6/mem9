@@ -47,15 +47,20 @@ interface HookApi {
   on: (hookName: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }) => void;
 }
 
-type HookAgentContext = {
+/**
+ * Runtime context passed as the second hook argument by OpenClaw.
+ * Kept local to avoid importing host types at the module level.
+ */
+interface HookContext {
   agentId?: string;
   sessionId?: string;
+  /** Legacy alias for `sessionId` used by older OpenClaw versions. */
   sessionKey?: string;
-};
+}
 
 function rememberSessionAgentId(
   sessionAgentIds: Map<string, string> | undefined,
-  ctx: HookAgentContext | undefined,
+  ctx: HookContext | undefined,
 ): void {
   if (!sessionAgentIds || !ctx || typeof ctx.agentId !== "string" || ctx.agentId.length === 0) {
     return;
@@ -288,6 +293,10 @@ function cleanAgentMessage(message: unknown): Record<string, unknown> | null {
   };
 }
 
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Hook registration
 // ---------------------------------------------------------------------------
@@ -301,6 +310,7 @@ export function registerHooks(
     enableToolResultPersist?: boolean;
     supportsPrependSystemContext?: boolean;
     fallbackSessionId?: string;
+    fallbackAgentId?: string;
     enableBeforePromptBuild?: boolean;
     enableAgentEndIngest?: boolean;
     sessionAgentIds?: Map<string, string>;
@@ -319,7 +329,7 @@ export function registerHooks(
       "before_prompt_build",
       async (event: unknown, ctx: unknown) => {
         try {
-          rememberSessionAgentId(options?.sessionAgentIds, (ctx ?? {}) as HookAgentContext);
+          rememberSessionAgentId(options?.sessionAgentIds, (ctx ?? {}) as HookContext);
           const evt = event as { prompt?: string };
           const prompt = evt?.prompt;
           if (!prompt || prompt.length < MIN_PROMPT_LEN) return;
@@ -415,8 +425,8 @@ export function registerHooks(
   // agent_end — auto-capture via smart ingest pipeline
   //
   // Size-aware message selection: walk backwards from most recent messages,
-  // accumulating until byte budget is hit. Then POST to tenant-scoped ingest endpoint.
-  // for server-side LLM extraction + reconciliation.
+  // accumulating until byte budget is hit. Then POST to the mem9 ingest endpoint
+  // for server-side extraction + reconciliation.
   // --------------------------------------------------------------------------
   if (enableAgentEndIngest) {
     api.on("agent_end", async (event: unknown, ctx: unknown) => {
@@ -427,53 +437,47 @@ export function registerHooks(
           sessionId?: string;
           agentId?: string;
         };
-        const hookCtx = (ctx ?? {}) as HookAgentContext;
+        const hookCtx = (ctx ?? {}) as HookContext;
         rememberSessionAgentId(options?.sessionAgentIds, hookCtx);
         if (!evt?.success || !evt.messages || evt.messages.length === 0) return;
 
-      // Format raw messages into IngestMessage format
-      const formatted: IngestMessage[] = [];
-      for (const msg of evt.messages) {
-        if (!msg || typeof msg !== "object") continue;
-        const m = msg as Record<string, unknown>;
-        const role = typeof m.role === "string" ? m.role : "";
-        if (!role) continue;
+        // Format raw messages into IngestMessage format.
+        const formatted: IngestMessage[] = [];
+        for (const msg of evt.messages) {
+          if (!msg || typeof msg !== "object") continue;
+          const m = msg as Record<string, unknown>;
+          const role = typeof m.role === "string" ? m.role : "";
+          if (!role) continue;
 
-        const content = extractTextContent(m.content);
+          const content = extractTextContent(m.content);
+          if (!content) continue;
 
-        if (!content) continue;
-
-        // Strip previously injected memory context to prevent re-ingestion
-        const cleaned = stripInjectedContext(content);
-        if (cleaned) {
-          formatted.push({ role, content: cleaned });
+          // Strip previously injected memory context to prevent re-ingestion.
+          const cleaned = stripInjectedContext(content);
+          if (cleaned) {
+            formatted.push({ role, content: cleaned });
+          }
         }
-      }
 
-      if (formatted.length === 0) return;
+        if (formatted.length === 0) return;
 
-      // Size-aware message selection (200KB budget by default)
-      const selected = selectMessages(formatted, maxIngestBytes);
+        // Size-aware message selection (200KB budget by default).
+        const selected = selectMessages(formatted, maxIngestBytes);
 
-      if (selected.length === 0) return;
+        if (selected.length === 0) return;
 
-        const sessionId = typeof hookCtx.sessionId === "string"
-          ? hookCtx.sessionId
-          : typeof hookCtx.sessionKey === "string"
-          ? hookCtx.sessionKey
-          : typeof evt.sessionId === "string"
-          ? evt.sessionId
-          : typeof options?.fallbackSessionId === "string"
-          ? options.fallbackSessionId
-          : `ses_${Date.now()}`;
+        const sessionId = nonEmptyString(hookCtx.sessionId)
+          ?? nonEmptyString(hookCtx.sessionKey)
+          ?? nonEmptyString(evt.sessionId)
+          ?? nonEmptyString(options?.fallbackSessionId)
+          ?? `ses_${Date.now()}`;
 
-        const agentId = typeof hookCtx.agentId === "string"
-          ? hookCtx.agentId
-          : typeof evt.agentId === "string"
-          ? evt.agentId
-          : AUTO_CAPTURE_SOURCE;
+        const agentId = nonEmptyString(hookCtx.agentId)
+          ?? nonEmptyString(evt.agentId)
+          ?? nonEmptyString(options?.fallbackAgentId)
+          ?? AUTO_CAPTURE_SOURCE;
 
-      // POST messages to unified memories endpoint — server handles LLM extraction + reconciliation
+        // POST messages to unified memories endpoint — server handles extraction and reconciliation.
         const result = await backend.ingest({
           messages: selected,
           session_id: sessionId,
@@ -493,7 +497,7 @@ export function registerHooks(
     });
   } else {
     api.on("agent_end", async (_event: unknown, ctx: unknown) => {
-      rememberSessionAgentId(options?.sessionAgentIds, (ctx ?? {}) as HookAgentContext);
+      rememberSessionAgentId(options?.sessionAgentIds, (ctx ?? {}) as HookContext);
     });
   }
 }

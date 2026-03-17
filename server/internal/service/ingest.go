@@ -94,16 +94,16 @@ func (s *IngestService) Ingest(ctx context.Context, agentName string, req Ingest
 	if mode != ModeSmart && mode != ModeRaw {
 		return nil, &domain.ValidationError{Field: "mode", Message: fmt.Sprintf("unsupported mode %q", mode)}
 	}
-	// For raw mode or no LLM, skip pipeline.
-	//if mode == ModeRaw || s.llm == nil {
-	//	return s.ingestRaw(ctx, agentName, req)
-	//}
+	// Strip plugin-injected context before any storage path.
+	req.Messages = stripInjectedContext(req.Messages)
 
-	// Strip previously injected memory context from messages.
-	cleaned := stripInjectedContext(req.Messages)
+	// For raw mode or no LLM, skip smart pipeline and store conversation directly.
+	if mode == ModeRaw || s.llm == nil {
+		return s.ingestRaw(ctx, agentName, req)
+	}
 
 	// Format conversation for LLM.
-	formatted := formatConversation(cleaned)
+	formatted := formatConversation(req.Messages)
 	if formatted == "" {
 		return &IngestResult{Status: "complete"}, nil
 	}
@@ -171,7 +171,7 @@ func (s *IngestService) ReconcileContent(ctx context.Context, agentName, agentID
 
 		facts, err := s.extractFacts(ctx, conversation)
 		if err != nil {
-			slog.Error("reconcile content: fact extraction failed", "err", err, "content", truncateRunes(content, 80))
+			slog.Error("reconcile content: fact extraction failed", "err", err)
 			totalWarnings++
 			failures++
 			continue
@@ -396,14 +396,21 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 	}
 
 	// Step 2: Map real UUIDs to integer IDs to prevent LLM hallucination.
+	// Include relative age so the LLM can resolve temporal conflicts
+	// (e.g., "Lives in Beijing" from 1 year ago vs new fact "Lives in Shanghai").
 	type memoryRef struct {
 		IntID int    `json:"id"`
 		Text  string `json:"text"`
+		Age   string `json:"age,omitempty"`
 	}
 	refs := make([]memoryRef, len(existingMemories))
 	idMap := make(map[int]string, len(existingMemories))
 	for i, m := range existingMemories {
-		refs[i] = memoryRef{IntID: i, Text: m.Content}
+		ref := memoryRef{IntID: i, Text: m.Content}
+		if !m.UpdatedAt.IsZero() {
+			ref.Age = relativeAge(m.UpdatedAt)
+		}
+		refs[i] = ref
 		idMap[i] = m.ID
 	}
 
@@ -429,28 +436,39 @@ func (s *IngestService) reconcile(ctx context.Context, agentName, agentID, sessi
 5. When the fact covers a topic not in any existing memory, use ADD.
 6. When the fact means the same thing as an existing memory (even if worded differently), use NOOP.
 7. Preserve the language of the original facts. Do not translate.
+8. Each existing memory has an "age" field showing when it was last updated. Use age as a tiebreaker: when a new fact conflicts with an existing memory on the same topic and there is no other signal, older memories are more likely outdated. Age alone is NOT sufficient reason to UPDATE or DELETE — the content must also conflict or supersede the existing memory.
 
 ## Examples
 
 Example 1 — ADD new information:
-  Existing memories: [{"id": 0, "text": "Is a software engineer"}]
+  Existing memories: [{"id": 0, "text": "Is a software engineer", "age": "2 months ago"}]
   New facts: ["Name is John"]
   Result: {"memory": [{"id": "0", "text": "Is a software engineer", "event": "NOOP"}, {"id": "new", "text": "Name is John", "event": "ADD"}]}
 
 Example 2 — UPDATE with more detail:
-  Existing memories: [{"id": 0, "text": "Likes to play cricket"}, {"id": 1, "text": "Is a software engineer"}]
+  Existing memories: [{"id": 0, "text": "Likes to play cricket", "age": "3 weeks ago"}, {"id": 1, "text": "Is a software engineer", "age": "2 months ago"}]
   New facts: ["Loves to play cricket with friends on weekends"]
   Result: {"memory": [{"id": "0", "text": "Loves to play cricket with friends on weekends", "event": "UPDATE", "old_memory": "Likes to play cricket"}, {"id": "1", "text": "Is a software engineer", "event": "NOOP"}]}
 
 Example 3 — DELETE contradicted information:
-  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  Existing memories: [{"id": 0, "text": "Name is John", "age": "5 months ago"}, {"id": 1, "text": "Loves cheese pizza", "age": "3 months ago"}]
   New facts: ["Dislikes cheese pizza"]
   Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "DELETE"}, {"id": "new", "text": "Dislikes cheese pizza", "event": "ADD"}]}
 
 Example 4 — NOOP for equivalent information:
-  Existing memories: [{"id": 0, "text": "Name is John"}, {"id": 1, "text": "Loves cheese pizza"}]
+  Existing memories: [{"id": 0, "text": "Name is John", "age": "5 months ago"}, {"id": 1, "text": "Loves cheese pizza", "age": "3 months ago"}]
   New facts: ["Name is John"]
   Result: {"memory": [{"id": "0", "text": "Name is John", "event": "NOOP"}, {"id": "1", "text": "Loves cheese pizza", "event": "NOOP"}]}
+
+Example 5 — Age as tiebreaker for ambiguous conflicts:
+  Existing memories: [{"id": 0, "text": "Prefers vim", "age": "1 year ago"}, {"id": 1, "text": "Works at startup X", "age": "8 months ago"}]
+  New facts: ["Prefers VS Code", "Works at company Y"]
+  Result: {"memory": [{"id": "0", "text": "Prefers VS Code", "event": "UPDATE", "old_memory": "Prefers vim"}, {"id": "1", "text": "Works at company Y", "event": "UPDATE", "old_memory": "Works at startup X"}]}
+
+Example 6 — Age does NOT trigger UPDATE without content conflict:
+  Existing memories: [{"id": 0, "text": "Likes coffee", "age": "2 years ago"}]
+  New facts: ["Enjoys coffee"]
+  Result: {"memory": [{"id": "0", "text": "Likes coffee", "event": "NOOP"}]}
 
 ## Output Format
 
@@ -519,7 +537,7 @@ Analyze the new facts and determine whether each should be added, updated, or de
 			}
 			newID, addErr := s.addInsight(ctx, agentName, agentID, sessionID, event.Text)
 			if addErr != nil {
-				slog.Warn("failed to add insight", "err", addErr, "text", event.Text)
+				slog.Warn("failed to add insight", "err", addErr)
 				warnings++
 				continue
 			}
@@ -641,7 +659,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 			}
 			searchAttempts++
 			if kwErr != nil {
-				slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact", truncateRunes(fact, 50), "err", kwErr)
+				slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact_len", len(fact), "err", kwErr)
 				continue
 			}
 			searchSuccesses++
@@ -666,7 +684,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 			var vecErr error
 			vecMatches, vecErr = s.memories.AutoVectorSearch(ctx, fact, filter, perFactLimit)
 			if vecErr != nil {
-				slog.Warn("gatherExistingMemories: auto vector search failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", vecErr)
+				slog.Warn("gatherExistingMemories: auto vector search failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", vecErr)
 			} else {
 				searchSuccesses++
 				vecLegOK = true
@@ -675,12 +693,12 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 			searchAttempts++
 			vec, embedErr := s.embedder.Embed(ctx, fact)
 			if embedErr != nil {
-				slog.Warn("gatherExistingMemories: embed failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", embedErr)
+				slog.Warn("gatherExistingMemories: embed failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", embedErr)
 			} else {
 				var vecErr error
 				vecMatches, vecErr = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
 				if vecErr != nil {
-					slog.Warn("gatherExistingMemories: vector search failed for fact, continuing with keyword leg", "fact", truncateRunes(fact, 50), "err", vecErr)
+					slog.Warn("gatherExistingMemories: vector search failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", vecErr)
 				} else {
 					searchSuccesses++
 					vecLegOK = true
@@ -699,7 +717,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 		}
 		searchAttempts++
 		if kwErr != nil {
-			slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact", truncateRunes(fact, 50), "err", kwErr)
+			slog.Warn("gatherExistingMemories: keyword/FTS search failed for fact, skipping", "fact_len", len(fact), "err", kwErr)
 		} else {
 			searchSuccesses++
 			addUnseen(kwMatches, false) // No threshold for keyword/FTS results
@@ -707,7 +725,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID stri
 
 		// If neither leg succeeded for this fact, log it clearly.
 		if !vecLegOK && kwErr != nil {
-			slog.Error("gatherExistingMemories: both search legs failed for fact", "fact", truncateRunes(fact, 50))
+			slog.Error("gatherExistingMemories: both search legs failed for fact", "fact_len", len(fact))
 		}
 	}
 
@@ -732,7 +750,7 @@ func (s *IngestService) addAllFacts(ctx context.Context, agentName, agentID, ses
 	for _, fact := range facts {
 		id, err := s.addInsight(ctx, agentName, agentID, sessionID, fact)
 		if err != nil {
-			slog.Warn("failed to add fact", "err", err, "fact", fact)
+			slog.Warn("failed to add fact", "err", err, "fact_len", len(fact))
 			warnings++
 			continue
 		}

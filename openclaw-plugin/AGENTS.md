@@ -1,67 +1,50 @@
 ---
-title: openclaw-plugin — OpenClaw TypeScript Plugin
+title: openclaw-plugin — OpenClaw memory plugin
 ---
-
-**Generated:** 2026-03-09
 
 ## Overview
 
-Server-mode-only TypeScript plugin for OpenClaw. Flat layout (no `src/` subdir).
-Registers 5 memory tools + 4 lifecycle hooks via `MemoryBackend` interface.
+TypeScript memory plugin for OpenClaw. This subtree is self-contained: tools,
+hooks, context-engine wiring, HTTP client, config schema, and shared types all
+live here.
 
-## Files
+## Commands
 
-| File | Role |
-|------|------|
-| `index.ts` | Plugin entry: registers tools + hooks; contains `LazyServerBackend` |
-| `backend.ts` | `MemoryBackend` interface (6 methods) |
-| `server-backend.ts` | Concrete implementation — calls mnemo-server REST API |
-| `hooks.ts` | 4 lifecycle hook registrations (`before_prompt_build`, `after_compaction`, `before_reset`, `agent_end`) |
-| `types.ts` | Shared types: `PluginConfig`, `Memory`, `SearchInput`, `IngestInput`, etc. |
-| `openclaw.plugin.json` | Plugin metadata + config schema |
-
-## MemoryBackend Interface
-
-```typescript
-interface MemoryBackend {
-  store(input: CreateMemoryInput): Promise<StoreResult>;   // Memory | IngestResult union
-  search(input: SearchInput): Promise<SearchResult>;
-  get(id: string): Promise<Memory | null>;
-  update(id: string, input: UpdateMemoryInput): Promise<Memory | null>;
-  remove(id: string): Promise<boolean>;
-  ingest(input: IngestInput): Promise<IngestResult>;        // smart pipeline
-}
+```bash
+cd openclaw-plugin && npm run typecheck
 ```
 
-`StoreResult = Memory | IngestResult` — callers duck-type on presence of `messages[]`.
+## Where to look
 
-## Unusual Patterns
+| Task | File |
+|------|------|
+| Plugin entry / registration | `index.ts` |
+| Backend abstraction | `backend.ts` |
+| REST API client | `server-backend.ts` |
+| Lifecycle hooks | `hooks.ts` |
+| Context engine wiring | `context-engine.ts` |
+| Shared types / config | `types.ts` |
+| Plugin manifest | `openclaw.plugin.json` |
 
-- **`LazyServerBackend`** (`index.ts`): wraps `ServerBackend`, defers tenant resolution to first
-  call via singleton `Promise`. Auto-provisions via `POST /v1alpha1/mem9s` if no `tenantID` in
-  config — provisioned ID is in-process only, not persisted.
-- **`ingest()` reuses `store()` HTTP endpoint**: Both call `POST /memories`. Server discriminates
-  by body shape (`messages[]` vs `content`). No separate route for ingest.
-- **Agent end hook** (`hooks.ts`): Strips previously injected `<relevant-memories>` blocks before
-  sending to `ingest()` — avoids feeding back injected context as new memories.
+## Local conventions
 
-## Lifecycle Hooks
+- ESM only; local imports always end with `.js`.
+- `MemoryBackend` is the seam between tools/hooks/context-engine and HTTP.
+- `ServerBackend` is the only backend currently used; keep request logic centralized there.
+- `LazyServerBackend` auto-provisions an `apiKey` via `POST /v1alpha1/mem9s` when config omits one.
+- Hook recall may split pinned memories into `prependSystemContext` when the host supports it.
+- `agent_end` and `tool_result_persist` must strip injected `<relevant-memories>` blocks before ingest/persist.
+- `AbortSignal.timeout(8_000)` is the standard fetch timeout.
 
-| Hook | Trigger | Action |
-|------|---------|--------|
-| `before_prompt_build` | Every LLM call | Search memories by prompt text, prepend as `<relevant-memories>` XML |
-| `after_compaction` | After `/compact` | No-op (server-side search always fresh) |
-| `before_reset` | Before `/reset` | Capture last 3 user messages as session-summary memory |
-| `agent_end` | Agent finishes | Strip injected blocks, call `ingest()` with `mode:"smart"` |
+## Error handling
 
-## Config (from `openclaw.plugin.json`)
+- `get()` / `update()` return `null` for known not-found cases.
+- Unexpected HTTP failures should throw.
+- Public methods keep explicit `Promise<T>` return types.
 
-Set in `plugins.entries.mnemo.config`:
-- `apiUrl` — mnemo-server base URL (required for server mode)
-- `tenantID` — tenant UUID (auto-provisioned if absent)
-- `agentName` — identifies this agent in memories (default: `"agent"`)
+## Anti-patterns
 
-## Anti-Patterns
-
-- No `direct-backend.ts` — CLAUDE.local.md mentions it but it does not exist; plugin is server-mode only
-- Do not add `jq` JSON parsing — bash hooks use `python3` (shell injection risk)
+- Do NOT add direct DB access here.
+- Do NOT remove `.js` extensions from imports; NodeNext resolution depends on them.
+- Do NOT scatter fetch logic across tools/hooks/context-engine; reuse the backend.
+- Do NOT add `jq`-based JSON parsing in hook logic.
