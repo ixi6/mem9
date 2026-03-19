@@ -167,6 +167,9 @@ func (s *Server) Router(
 		r.Get("/imports", s.listTasks)
 		r.Get("/imports/{id}", s.getTask)
 
+		// Session messages (TiDB backend only).
+		r.Get("/session-messages", s.handleListSessionMessages)
+
 	})
 
 	r.Route("/v1alpha2/mem9s", func(r chi.Router) {
@@ -181,6 +184,9 @@ func (s *Server) Router(
 		r.Post("/imports", s.createTask)
 		r.Get("/imports", s.listTasks)
 		r.Get("/imports/{id}", s.getTask)
+
+		// Session messages (TiDB backend only).
+		r.Get("/session-messages", s.handleListSessionMessages)
 	})
 
 	return r

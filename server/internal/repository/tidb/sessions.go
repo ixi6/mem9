@@ -378,3 +378,95 @@ func fillSessionMemory(m *domain.Memory, sessionID, agentID, source, role, conte
 	m.Metadata = metaBytes
 	return m
 }
+
+// ListBySessionIDs returns raw session messages for the given session IDs.
+// If limitPerSession > 0, at most that many rows are returned per session_id,
+// using a window function (ROW_NUMBER). Results are ordered by
+// created_at ASC, seq ASC, id ASC.
+func (r *SessionRepo) ListBySessionIDs(ctx context.Context, sessionIDs []string, limitPerSession int) ([]*domain.Session, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+
+	// Deduplicate session IDs.
+	seen := make(map[string]struct{}, len(sessionIDs))
+	unique := sessionIDs[:0:len(sessionIDs)]
+	unique = unique[:0]
+	for _, id := range sessionIDs {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+
+	placeholders := make([]string, len(unique))
+	args := make([]any, len(unique))
+	for i, id := range unique {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ", ")
+
+	const cols = `id, session_id, agent_id, source, seq, role, content, content_type,
+		content_hash, tags, state, created_at, updated_at`
+
+	var sqlQuery string
+	if limitPerSession > 0 {
+		sqlQuery = fmt.Sprintf(`
+			SELECT %s FROM (
+				SELECT %s,
+					ROW_NUMBER() OVER (
+						PARTITION BY session_id
+						ORDER BY created_at ASC, seq ASC, id ASC
+					) AS rn
+				FROM sessions
+				WHERE session_id IN (%s) AND state = 'active'
+			) t WHERE rn <= ?
+			ORDER BY session_id ASC, created_at ASC, seq ASC, id ASC`,
+			cols, cols, inClause)
+		args = append(args, limitPerSession)
+	} else {
+		sqlQuery = fmt.Sprintf(`
+			SELECT %s
+			FROM sessions
+			WHERE session_id IN (%s) AND state = 'active'
+			ORDER BY session_id ASC, created_at ASC, seq ASC, id ASC`,
+			cols, inClause)
+	}
+
+	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		if internaltenant.IsTableNotFoundError(err) {
+			return nil, nil
+		}
+		slog.Error("list by session ids failed", "cluster_id", r.clusterID, "err", err)
+		return nil, fmt.Errorf("list by session ids: cluster_id=%s: %w", r.clusterID, err)
+	}
+	defer rows.Close()
+
+	var results []*domain.Session
+	for rows.Next() {
+		var s domain.Session
+		var tagsJSON []byte
+		var agentID, source, contentType sql.NullString
+		if err := rows.Scan(
+			&s.ID, &s.SessionID, &agentID, &source,
+			&s.Seq, &s.Role, &s.Content, &contentType,
+			&s.ContentHash, &tagsJSON, &s.State,
+			&s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("list by session ids scan: %w", err)
+		}
+		s.AgentID = agentID.String
+		s.Source = source.String
+		s.ContentType = contentType.String
+		if len(tagsJSON) > 0 {
+			_ = json.Unmarshal(tagsJSON, &s.Tags)
+		}
+		results = append(results, &s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list by session ids rows: %w", err)
+	}
+	return results, nil
+}

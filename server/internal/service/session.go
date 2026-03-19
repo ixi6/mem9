@@ -49,6 +49,11 @@ func (s *SessionService) BulkCreate(ctx context.Context, agentName string, req I
 	}
 	return nil
 }
+// ListBySessionIDs returns raw session messages for the given session IDs.
+// If limitPerSession > 0, at most that many messages are returned per session.
+func (s *SessionService) ListBySessionIDs(ctx context.Context, sessionIDs []string, limitPerSession int) ([]*domain.Session, error) {
+	return s.sessions.ListBySessionIDs(ctx, sessionIDs, limitPerSession)
+}
 
 func (s *SessionService) Search(ctx context.Context, f domain.MemoryFilter) ([]domain.Memory, error) {
 	limit := f.Limit

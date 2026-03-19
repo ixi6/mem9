@@ -26,3 +26,6 @@ func (e *ValidationError) Error() string {
 func (e *ValidationError) Unwrap() error {
 	return ErrValidation
 }
+
+// ErrNotImplemented is returned by repository methods not supported by the current backend.
+var ErrNotImplemented = errors.New("not implemented")

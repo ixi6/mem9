@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -323,4 +324,44 @@ func tagsAtIndex(tags [][]string, i int) []string {
 		return tags[i]
 	}
 	return []string{}
+}
+
+// handleListSessionMessages handles GET /session-messages
+// Returns raw session messages for one or more session_id values.
+// Query params:
+//   - session_id (repeatable, required)
+//   - limit_per_session (optional positive integer)
+func (s *Server) handleListSessionMessages(w http.ResponseWriter, r *http.Request) {
+	auth := authInfo(r)
+	svc := s.resolveServices(auth)
+
+	sessionIDs := r.URL.Query()["session_id"]
+	if len(sessionIDs) == 0 {
+		s.handleError(w, &domain.ValidationError{Field: "session_id", Message: "at least one session_id is required"})
+		return
+	}
+
+	limitPerSession := 0
+	if raw := r.URL.Query().Get("limit_per_session"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			s.handleError(w, &domain.ValidationError{Field: "limit_per_session", Message: "must be a positive integer"})
+			return
+		}
+		limitPerSession = n
+	}
+
+	messages, err := svc.session.ListBySessionIDs(r.Context(), sessionIDs, limitPerSession)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotImplemented) {
+			respondError(w, http.StatusNotImplemented, "session-messages API not supported on this backend")
+			return
+		}
+		s.handleError(w, err)
+		return
+	}
+	if messages == nil {
+		messages = []*domain.Session{}
+	}
+	respond(w, http.StatusOK, map[string]any{"messages": messages})
 }

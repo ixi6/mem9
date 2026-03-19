@@ -71,4 +71,10 @@ type SessionRepo interface {
 	FTSSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	KeywordSearch(ctx context.Context, query string, f domain.MemoryFilter, limit int) ([]domain.Memory, error)
 	FTSAvailable() bool
+
+	// ListBySessionIDs returns raw session messages for the given session IDs.
+	// If limitPerSession > 0, at most that many messages are returned per session.
+	// Results are ordered by created_at ASC, seq ASC, id ASC.
+	// Returns domain.ErrNotImplemented for backends that do not support this operation.
+	ListBySessionIDs(ctx context.Context, sessionIDs []string, limitPerSession int) ([]*domain.Session, error)
 }
