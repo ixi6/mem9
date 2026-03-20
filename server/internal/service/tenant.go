@@ -203,3 +203,10 @@ func (s *TenantService) EnsureSessionsTable(ctx context.Context, db *sql.DB) err
 	}
 	return nil
 }
+
+func (s *TenantService) EnsureMemorySessionLinksTable(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, tenant.TenantMemorySessionLinksSchema); err != nil {
+		return fmt.Errorf("ensure memory_session_links table: %w", err)
+	}
+	return nil
+}

@@ -84,9 +84,10 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 		}
 		memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
 		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
+		linkRepo := repository.NewMemorySessionLinkRepo(s.dbBackend, auth.TenantDB)
 		svc := resolvedSvc{
-			memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
-			ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+			memory:  service.NewMemoryService(memRepo, linkRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+			ingest:  service.NewIngestService(memRepo, linkRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
 			session: service.NewSessionService(sessRepo, s.embedder, s.autoModel),
 		}
 		actual, loaded := s.svcCache.LoadOrStore(key, svc)
@@ -96,6 +97,11 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 					s.logger.Warn("sessions table migration failed",
 						"cluster_id", auth.ClusterID,
 						"err", err) // no tenant field: TenantID is empty in this branch
+				}
+				if err := s.tenant.EnsureMemorySessionLinksTable(context.Background(), auth.TenantDB); err != nil {
+					s.logger.Warn("memory_session_links table migration failed",
+						"cluster_id", auth.ClusterID,
+						"err", err)
 				}
 			}()
 		}
@@ -107,9 +113,10 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 	}
 	memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
 	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
+	linkRepo := repository.NewMemorySessionLinkRepo(s.dbBackend, auth.TenantDB)
 	svc := resolvedSvc{
-		memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
-		ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+		memory:  service.NewMemoryService(memRepo, linkRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+		ingest:  service.NewIngestService(memRepo, linkRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
 		session: service.NewSessionService(sessRepo, s.embedder, s.autoModel),
 	}
 	actual, loaded := s.svcCache.LoadOrStore(key, svc)
@@ -117,6 +124,12 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 		go func() {
 			if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
 				s.logger.Warn("sessions table migration failed",
+					"cluster_id", auth.ClusterID,
+					"tenant", auth.TenantID,
+					"err", err)
+			}
+			if err := s.tenant.EnsureMemorySessionLinksTable(context.Background(), auth.TenantDB); err != nil {
+				s.logger.Warn("memory_session_links table migration failed",
 					"cluster_id", auth.ClusterID,
 					"tenant", auth.TenantID,
 					"err", err)
