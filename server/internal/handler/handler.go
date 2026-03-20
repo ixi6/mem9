@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,37 +95,7 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 		}
 		actual, loaded := s.svcCache.LoadOrStore(key, svc)
 		if !loaded {
-			go func() {
-				if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
-					s.logger.Warn("sessions table migration failed",
-						"cluster_id", auth.ClusterID,
-						"err", err)
-				}
-				const (
-					recallEnsureMaxAttempts = 5
-					recallEnsureBaseDelay   = 2 * time.Second
-					recallEnsureMaxDelay    = 60 * time.Second
-				)
-				delay := recallEnsureBaseDelay
-				for attempt := 1; attempt <= recallEnsureMaxAttempts; attempt++ {
-					ensureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					err := s.tenant.EnsureRecallEventsTable(ensureCtx, auth.TenantDB)
-					cancel()
-					if err == nil {
-						break
-					}
-					s.logger.Warn("EnsureRecallEventsTable failed — will retry",
-						"cluster_id", auth.ClusterID,
-						"attempt", attempt, "err", err)
-					if attempt == recallEnsureMaxAttempts {
-						s.logger.Error("EnsureRecallEventsTable exhausted retries — recall analytics disabled for this process lifetime",
-							"cluster_id", auth.ClusterID, "err", err)
-						break
-					}
-					time.Sleep(delay)
-					delay = min(delay*2, recallEnsureMaxDelay)
-				}
-			}()
+			go s.ensureRecallEventsAsync(auth.TenantDB, auth.ClusterID, "")
 		}
 		return actual.(resolvedSvc)
 	}
@@ -143,42 +114,44 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
 	}
 	actual, loaded := s.svcCache.LoadOrStore(key, svc)
 	if !loaded {
-		go func() {
-			if err := s.tenant.EnsureSessionsTable(context.Background(), auth.TenantDB); err != nil {
-				s.logger.Warn("sessions table migration failed",
-					"cluster_id", auth.ClusterID,
-					"tenant", auth.TenantID,
-					"err", err)
-			}
-			const (
-				recallEnsureMaxAttempts = 5
-				recallEnsureBaseDelay   = 2 * time.Second
-				recallEnsureMaxDelay    = 60 * time.Second
-			)
-			delay := recallEnsureBaseDelay
-			for attempt := 1; attempt <= recallEnsureMaxAttempts; attempt++ {
-				ensureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err := s.tenant.EnsureRecallEventsTable(ensureCtx, auth.TenantDB)
-				cancel()
-				if err == nil {
-					break
-				}
-				s.logger.Warn("EnsureRecallEventsTable failed — will retry",
-					"cluster_id", auth.ClusterID,
-					"tenant", auth.TenantID,
-					"attempt", attempt, "err", err)
-				if attempt == recallEnsureMaxAttempts {
-					s.logger.Error("EnsureRecallEventsTable exhausted retries — recall analytics disabled for this process lifetime",
-						"cluster_id", auth.ClusterID,
-						"tenant", auth.TenantID, "err", err)
-					break
-				}
-				time.Sleep(delay)
-				delay = min(delay*2, recallEnsureMaxDelay)
-			}
-		}()
+		go s.ensureRecallEventsAsync(auth.TenantDB, auth.ClusterID, auth.TenantID)
 	}
 	return actual.(resolvedSvc)
+}
+
+func (s *Server) ensureRecallEventsAsync(db *sql.DB, clusterID, tenantID string) {
+	if err := s.tenant.EnsureSessionsTable(context.Background(), db); err != nil {
+		s.logger.Warn("sessions table migration failed",
+			"cluster_id", clusterID,
+			"tenant", tenantID,
+			"err", err)
+	}
+	const (
+		maxAttempts = 5
+		baseDelay   = 2 * time.Second
+		maxDelay    = 60 * time.Second
+	)
+	delay := baseDelay
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ensureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.tenant.EnsureRecallEventsTable(ensureCtx, db)
+		cancel()
+		if err == nil {
+			break
+		}
+		s.logger.Warn("EnsureRecallEventsTable failed — will retry",
+			"cluster_id", clusterID,
+			"tenant", tenantID,
+			"attempt", attempt, "err", err)
+		if attempt == maxAttempts {
+			s.logger.Error("EnsureRecallEventsTable exhausted retries — recall analytics disabled for this process lifetime",
+				"cluster_id", clusterID,
+				"tenant", tenantID, "err", err)
+			break
+		}
+		time.Sleep(delay)
+		delay = min(delay*2, maxDelay)
+	}
 }
 
 // Router builds the chi router with all routes and middleware.

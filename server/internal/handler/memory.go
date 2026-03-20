@@ -215,7 +215,10 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 	if filter.Query != "" {
 		searchID := uuid.NewString()
 		requestID := chimw.GetReqID(r.Context())
-		go svc.recall.Record(auth.AgentName, filter.SessionID, searchID, requestID, filter.Query, memories)
+		recallMems := append([]domain.Memory(nil), memories...)
+		// auth.AgentName is always the caller identity (X-Mnemo-Agent-Id header).
+		// filter.AgentID is the search target, not the requester — do not use it here.
+		go svc.recall.Record(auth.AgentName, filter.SessionID, searchID, requestID, filter.Query, recallMems)
 	}
 }
 
@@ -481,9 +484,9 @@ func (s *Server) getInterests(w http.ResponseWriter, r *http.Request) {
 		top = n
 	}
 
-	agentID := q.Get("agent_id")
-	if agentID == "" {
-		agentID = auth.AgentName
+	agentID := auth.AgentName
+	if agentIDVals, ok := q["agent_id"]; ok {
+		agentID = agentIDVals[0]
 	}
 
 	f := domain.InterestFilter{

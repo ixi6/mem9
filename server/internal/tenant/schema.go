@@ -154,6 +154,7 @@ const TenantRecallEventsSchema = `CREATE TABLE IF NOT EXISTS recall_events (
     created_at   TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_re_agent    (agent_id),
     INDEX idx_re_created  (created_at),
+    INDEX idx_re_agent_created (agent_id, created_at),
     INDEX idx_re_query    (query_hash),
     INDEX idx_re_memory   (memory_id),
     INDEX idx_re_search   (search_id)

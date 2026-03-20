@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/qiffang/mnemos/server/internal/domain"
 	internaltenant "github.com/qiffang/mnemos/server/internal/tenant"
@@ -24,38 +25,28 @@ func (r *RecallEventRepo) BulkRecord(ctx context.Context, events []*domain.Recal
 		return nil
 	}
 
-	const stmtSQL = `INSERT IGNORE INTO recall_events
-		(id, search_id, query, query_hash, agent_id, session_id, memory_id, memory_type, tags, score, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+	const rowPlaceholder = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`
+	placeholders := make([]string, len(events))
+	args := make([]any, 0, len(events)*10)
 
-	stmt, err := r.db.PrepareContext(ctx, stmtSQL)
-	if err != nil {
+	for i, e := range events {
+		placeholders[i] = rowPlaceholder
+		args = append(args,
+			e.ID, e.SearchID, e.Query, e.QueryHash,
+			nullString(e.AgentID), nullString(e.SessionID),
+			e.MemoryID, e.MemoryType, marshalTags(e.Tags), e.Score,
+		)
+	}
+
+	query := `INSERT IGNORE INTO recall_events
+		(id, search_id, query, query_hash, agent_id, session_id, memory_id, memory_type, tags, score, created_at)
+		VALUES ` + strings.Join(placeholders, ",")
+
+	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
 		if internaltenant.IsTableNotFoundError(err) {
 			return nil
 		}
-		return fmt.Errorf("recall_events bulk record prepare: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, e := range events {
-		tagsJSON := marshalTags(e.Tags)
-		var agentID, sessionID sql.NullString
-		if e.AgentID != "" {
-			agentID = sql.NullString{String: e.AgentID, Valid: true}
-		}
-		if e.SessionID != "" {
-			sessionID = sql.NullString{String: e.SessionID, Valid: true}
-		}
-		if _, err := stmt.ExecContext(ctx,
-			e.ID, e.SearchID, e.Query, e.QueryHash,
-			agentID, sessionID,
-			e.MemoryID, e.MemoryType, tagsJSON, e.Score,
-		); err != nil {
-			if internaltenant.IsTableNotFoundError(err) {
-				return nil
-			}
-			return fmt.Errorf("recall_events bulk record exec: %w", err)
-		}
+		return fmt.Errorf("recall_events bulk record: %w", err)
 	}
 	return nil
 }
