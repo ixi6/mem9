@@ -20,14 +20,14 @@
     "disconnect": "断开连接",
     "stats": {
       "total": "条记忆",
-      "pinned": "你保存的",
-      "insight": "对话中学到的"
+      "pinned": "手动记录",
+      "insight": "自主学习"
     }
   },
   "tabs": {
     "all": "全部",
-    "pinned": "你保存的",
-    "insight": "对话中学到的"
+    "pinned": "手动记录",
+    "insight": "自主学习"
   },
   "search": {
     "placeholder": "搜索你的记忆，试试用自然语言描述…",
@@ -42,8 +42,8 @@
   },
   "detail": {
     "type": {
-      "pinned": "你保存的",
-      "insight": "对话中学到的"
+      "pinned": "手动记录",
+      "insight": "自主学习"
     },
     "source": "来源",
     "agent": "Agent",
@@ -56,6 +56,16 @@
     "edit": "编辑",
     "close": "关闭"
   },
+  "session_preview": {
+    "title": "对话原文",
+    "loading": "正在加载对话…",
+    "role": {
+      "user": "用户",
+      "assistant": "助手",
+      "system": "系统",
+      "tool": "工具"
+    }
+  },
   "add": {
     "button": "添加记忆",
     "title": "添加一条记忆",
@@ -64,7 +74,7 @@
     "tags_placeholder": "例如：偏好, 项目",
     "cancel": "取消",
     "save": "保存",
-    "footer": "这条记忆将标记为「你保存的」",
+    "footer": "这条记忆将标记为「手动记录」",
     "success": "记忆已保存"
   },
   "edit": {
@@ -89,13 +99,13 @@
     "cta": "保存第一条记忆"
   },
   "legend": {
-    "pinned": "你明确要求记住的",
-    "insight": "AI 从对话中提取的"
+    "pinned": "你主动要求记住的内容",
+    "insight": "AI 在对话中自主提取的记忆"
   },
   "info": {
     "toggle": "了解记忆类型",
-    "pinned": "「你保存的」是你明确要求 agent 记住的内容",
-    "insight": "「对话中学到的」是 AI 从你们的对话中自动提取的记忆",
+    "pinned": "「手动记录」是你明确要求 agent 记住的内容",
+    "insight": "「自主学习」是 AI 从你们的对话中自动提取的记忆",
     "note": "这里展示的是已经存下来的记忆，不是 agent 每次回复的推理过程"
   },
   "error": {
@@ -120,7 +130,7 @@
     "title": "导出记忆",
     "description": "将所有活跃记忆下载到本地，文件格式为 JSON。",
     "count": "将导出 {{count}} 条记忆",
-    "breakdown": "{{pinned}} 条你保存的 · {{insight}} 条对话中学到的",
+    "breakdown": "{{pinned}} 条手动记录 · {{insight}} 条自主学习",
     "note": "导出包含所有活跃记忆，不受当前筛选条件影响。原始时间戳会保留。",
     "cancel": "取消",
     "button": "下载",
@@ -220,14 +230,14 @@
     "batch_memories": "{{count}} 条记忆",
     "confidence": "占比 {{value}}",
     "batch_summary": {
-      "syncing": "Synchronizing {{current}}/{{total}} batches...",
-      "processing": "Analyzing {{current}}/{{total}} batches...",
-      "completed": "Synchronized {{current}}/{{total}} batches"
+      "syncing": "正在准备第 {{current}}/{{total}} 批分析数据…",
+      "processing": "正在分析第 {{current}}/{{total}} 批…",
+      "completed": "已完成 {{current}}/{{total}} 批"
     },
     "phase": {
       "idle": "未开始",
-      "creating": "创建中",
-      "uploading": "上传中",
+      "creating": "准备分析中",
+      "uploading": "准备分析中",
       "processing": "分析中",
       "completed": "已完成",
       "degraded": "已降级",
@@ -236,14 +246,14 @@
     "metrics": {
       "memories": "总记忆数",
       "processed": "已处理",
-      "uploaded": "已上传批次",
+      "uploaded": "已准备批次",
       "failed": "失败批次"
     },
     "batch_status": {
-      "EXPECTED": "待上传",
-      "UPLOADED": "已上传",
+      "EXPECTED": "待处理",
+      "UPLOADED": "已准备",
       "QUEUED": "排队中",
-      "RUNNING": "处理中",
+      "RUNNING": "分析中",
       "SUCCEEDED": "已完成",
       "FAILED": "失败",
       "RETRYING": "重试中",
